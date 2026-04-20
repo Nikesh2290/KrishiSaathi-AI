@@ -58,12 +58,26 @@ async def detect_disease(
     return data
 
 
-async def detect_disease_by_ref(image_ref, prefer_local, settings):
-    """Resolve an image_ref to bytes and dispatch to detect_disease.
+from modules.vision import image_store as _image_store
 
-    During Phase 1 this is a thin wrapper that returns a no-image result;
-    Phase 2 (Task 11) wires it to the real image store.
-    """
+
+async def detect_disease_bytes(data: bytes, mime: str, prefer_local, settings):
+    import base64
+
+    b64 = base64.b64encode(data).decode("ascii")
+    return await detect_disease(b64, prefer_local, settings)
+
+
+async def detect_disease_by_ref(image_ref, prefer_local, settings):
     if not image_ref:
         return {"disease": None, "confidence": 0.0, "note": "no_image"}
-    return {"disease": None, "confidence": 0.0, "note": "image_ref_unresolved"}
+    stored = _image_store.get(image_ref)
+    if stored is None:
+        from models.errors import ErrorCode, KrishiHTTPException
+
+        raise KrishiHTTPException(
+            status_code=404,
+            code=ErrorCode.IMAGE_REF_EXPIRED,
+            message="image_ref is unknown or expired",
+        )
+    return await detect_disease_bytes(stored.data, stored.mime, prefer_local, settings)
