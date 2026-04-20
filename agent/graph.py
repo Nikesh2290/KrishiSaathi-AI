@@ -19,6 +19,7 @@ from agent.connectivity_router import data_source_for_route, resolve_route
 from agent.gemma_client import generate
 from config.settings import Settings, get_settings
 from db.sqlite_client import get_farmer_twin
+from models.errors import KrishiHTTPException
 from models.farmer import FarmerTwin
 from models.request import AgentRequest
 from modules.climate import engine as climate_engine
@@ -222,6 +223,10 @@ async def _dispatch_one(
     except asyncio.TimeoutError:
         logger.warning("Tool %s timed out", name)
         return {"error": "timeout", "tool": name}
+    except KrishiHTTPException:
+        # Typed HTTP errors (e.g. IMAGE_REF_EXPIRED) must surface to the
+        # FastAPI exception handler with their proper error envelope.
+        raise
     except Exception as e:
         logger.exception("Tool %s failed: %s", name, e)
         return {"error": str(e), "tool": name}
