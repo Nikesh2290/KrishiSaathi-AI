@@ -208,3 +208,8 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# KrishiSaathi runtime DB, Chroma, offline cache
+data/
+offline/data/*
+!offline/data/.gitkeep
