@@ -28,3 +28,24 @@ def test_fallback_hint_rejects_invalid_value():
 
     with pytest.raises(ValidationError):
         AgentResponse(fallback_hint="NOT_A_VALID_HINT")  # type: ignore[arg-type]
+
+
+from response.generator import build
+
+
+def test_generator_populates_new_fields():
+    resp = build(
+        draft_text="Test Hindi text.",
+        tool_results={"vision_0": {"disease": "Yellow Rust", "confidence": 0.87}},
+        tool_trace=["vision"],
+        data_source="live",
+        language="hi",
+        safety_flags=[],
+        model_used="gemma-4-26b-a4b-it",
+        confidence_score=0.87,
+        fallback_hint=None,
+    )
+    assert resp.model_used == "gemma-4-26b-a4b-it"
+    assert resp.confidence_score == 0.87
+    assert resp.fallback_hint is None
+    assert resp.structured.kind == "disease"

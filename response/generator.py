@@ -3,16 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
-from models.response import AgentResponse, ConfidenceLevel, StructuredResult
-
-
-def _confidence_from_tools(tool_results: Dict[str, Any]) -> ConfidenceLevel:
-    for v in tool_results.values():
-        if isinstance(v, dict) and float(v.get("confidence") or 1.0) < 0.5:
-            return "low"
-    return "medium"
+from models.response import AgentResponse, ConfidenceLevel, FallbackHint, StructuredResult
 
 
 def _intent_from_trace(trace: List[str]) -> str:
@@ -31,6 +24,14 @@ def _intent_from_trace(trace: List[str]) -> str:
     return "general"
 
 
+def _level_from_score(score: float) -> ConfidenceLevel:
+    if score >= 0.80:
+        return "high"
+    if score >= 0.60:
+        return "medium"
+    return "low"
+
+
 def build(
     draft_text: str,
     tool_results: Dict[str, Any],
@@ -38,11 +39,13 @@ def build(
     data_source: str,
     language: str,
     safety_flags: List[str],
+    model_used: str = "",
+    confidence_score: float = 0.5,
+    fallback_hint: Optional[FallbackHint] = None,
 ) -> AgentResponse:
     intent = _intent_from_trace(tool_trace)
-    conf: ConfidenceLevel = _confidence_from_tools(tool_results)
     if "low_confidence_vision" in safety_flags:
-        conf = "low"
+        confidence_score = min(confidence_score, 0.4)
 
     structured_data: Dict[str, Any] = {"intent": intent, "tool_results": tool_results}
     if intent == "disease":
@@ -55,9 +58,12 @@ def build(
         text=draft_text,
         structured=StructuredResult(kind=intent, data=structured_data),
         data_source="offline" if data_source == "offline" else "live",  # type: ignore[arg-type]
-        confidence_level=conf,
+        confidence_level=_level_from_score(confidence_score),
+        confidence_score=round(float(confidence_score), 3),
+        model_used=model_used,
         tool_trace=tool_trace,
         language=language,
-        timestamp=datetime.now(timezone.utc),
         safety_flags=safety_flags,
+        fallback_hint=fallback_hint,
+        timestamp=datetime.now(timezone.utc),
     )
