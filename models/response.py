@@ -11,11 +11,10 @@ from pydantic import BaseModel, Field
 
 ConfidenceLevel = Literal["high", "medium", "low"]
 DataSource = Literal["live", "offline"]
+FallbackHint = Literal["USE_ONDEVICE", "RETRY_ONLINE_LATER"]
 
 
 class StructuredResult(BaseModel):
-    """Flexible structured block per intent (disease, weather, schemes, etc.)."""
-
     kind: str = "general"
     data: Dict[str, Any] = Field(default_factory=dict)
 
@@ -26,11 +25,13 @@ class AgentResponse(BaseModel):
     structured: StructuredResult = Field(default_factory=StructuredResult)
     data_source: DataSource = "live"
     confidence_level: ConfidenceLevel = "medium"
+    confidence_score: float = 0.5
+    model_used: str = ""
     tool_trace: List[str] = Field(default_factory=list)
+    safety_flags: List[str] = Field(default_factory=list)
+    fallback_hint: Optional[FallbackHint] = None
     language: str = "hi"
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    safety_flags: List[str] = Field(default_factory=list)
 
     def model_dump_json_safe(self) -> dict:
-        d = self.model_dump(mode="json")
-        return d
+        return self.model_dump(mode="json")

@@ -4,12 +4,13 @@
 
 | Piece | Choice |
 | :--- | :--- |
-| Edge / local | Gemma-class via **Ollama** (e.g. Gemma 2 2B) — free, offline-friendly |
-| Cloud fallback | **Google AI Studio** (Gemini API) with a Gemma-class / Gemma model id — free tier, no paid Vertex required |
-| Orchestration | **LangGraph**-style loop: route → plan → tools → synthesize |
+| On-device | **Gemma 4 E4B** (fallback **E2B**) via **MediaPipe LLM Inference** in the RN companion app — free, offline-friendly |
+| Cloud primary | **Google AI Studio** (Gemini API) with `gemma-4-26b-a4b-it` — free tier, no paid Vertex required |
+| Cloud escalation | `gemma-4-31b-it` via **Google AI Studio** for low-confidence queries |
+| Orchestration | **LangGraph**-style loop: route → plan → tools → synthesize → safety → respond |
 | API / data | **FastAPI** · **SQLite** (twin, rate limits, logs) · **ChromaDB** (scheme RAG) |
 | Weather (live) | **Open-Meteo** — no API key |
-| **Frontend** | Separate app; this repo is **backend-only** — see [`docs/api_contract.md`](docs/api_contract.md) |
+| **Frontend** | Separate RN app; this repo is **backend-only** — see [`docs/api_contract.md`](docs/api_contract.md) and [`docs/frontend_handoff.md`](docs/frontend_handoff.md) |
 | **Architecture diagram** | [Section 2 — System architecture](#2-system-architecture) and Cursor Canvas `krishisaathi-architecture.canvas.tsx` (optional) |
 
 ---
@@ -54,7 +55,7 @@ The system is built around three constraints:
 | Non-English, low-literacy users | Voice + Hinglish / regional language support |
 | Fragmented information | One agentic surface across six intelligence modules |
 
-The AI “brain” uses **Gemma-class** models: small **Ollama** weights locally and a **Google AI Studio** model when cloud is available, orchestrated with a **LangGraph**-style tool loop (see `agent/react_loop.py`).
+The AI "brain" uses **Gemma 4** end-to-end: **Gemma 4 E4B** (fallback **E2B**) on-device via **MediaPipe LLM Inference** in the RN companion app, and `gemma-4-26b-a4b-it` on **Google AI Studio** for cloud reasoning (escalating to `gemma-4-31b-it` when confidence is low), orchestrated with a **LangGraph**-style tool loop (see `agent/react_loop.py`).
 
 ---
 
@@ -76,8 +77,8 @@ Renders on GitHub, GitLab, and many Markdown previews:
 flowchart TB
   FM["Farmer (mobile)<br/>voice · photo · text"]
 
-  subgraph ondev["On-device interaction layer"]
-    E2B["Gemma 4 · 2B edge<br/>intent · tagging · offline Q&A"]
+  subgraph ondev["On-device interaction layer (RN app)"]
+    E2B["Gemma 4 E4B (on-device, MediaPipe)<br/>intent · tagging · offline Q&A"]
     CACHE[("Local cache<br/>SQLite / DuckDB")]
   end
 
@@ -88,7 +89,7 @@ flowchart TB
 
   E2B --> ROUTER
 
-  PLAN["Cloud agent core<br/>Gemma 4 · 27B+ planner"]
+  PLAN["Cloud agent core<br/>Gemma 4 26B A4B (AI Studio)"]
   OFF["Offline data mode<br/>CSV · Parquet · JSON"]
 
   ROUTER -->|online| PLAN
@@ -140,10 +141,13 @@ flowchart TB
 
 ### 3.1 Interaction layer (on-device)
 
+On-device: **Gemma 4 E4B** (fallback **E2B**) via **MediaPipe LLM Inference** in the RN companion app.
+
 | | |
 | :--- | :--- |
 | **Purpose** | Zero-internet usability and low-latency first response |
-| **Model** | Gemma 4 · 2B (INT4 quantized, mid-range Android) |
+| **Model** | `gemma-4-e4b-it` (primary); `gemma-4-e2b-it` fallback on <4 GB RAM devices |
+| **Runtime** | MediaPipe LLM Inference (Android); weights downloaded from Google AI Edge Gallery on first launch |
 | **Output** | Structured `AgentRequest` → connectivity router |
 
 **Responsibilities**
@@ -172,11 +176,14 @@ else:
 
 ### 3.3 Cloud agent core
 
+Primary model: `gemma-4-26b-a4b-it`. Escalates to `gemma-4-31b-it` when safety-layer confidence is below threshold.
+
 | | |
 | :--- | :--- |
 | **Purpose** | Heavy reasoning, multi-step planning, tool orchestration |
-| **Model** | Gemma-class via **Google AI Studio** (`AI_STUDIO_MODEL` in `config/settings.py`) — no Vertex AI required for the hackathon build |
-| **Pattern** | Planner emits JSON tool calls; `langgraph` graph executes route → plan → tools → synthesize |
+| **Primary model** | `gemma-4-26b-a4b-it` via **Google AI Studio** (`AI_STUDIO_MODEL` in `config/settings.py`) — no Vertex AI required for the hackathon build |
+| **Escalation model** | `gemma-4-31b-it` via **Google AI Studio** (triggered by safety layer on low confidence) |
+| **Pattern** | Planner emits JSON tool calls; `langgraph` graph executes route → plan → tools → synthesize → safety → respond |
 
 **Responsibilities**
 
@@ -285,6 +292,8 @@ Offline answers include a clear disclaimer, e.g.
 
 Runs **after** tool synthesis, **before** the response generator.
 
+When a synthesized answer falls below the confidence threshold (default `0.70`), the safety layer **escalates** from `gemma-4-26b-a4b-it` to `gemma-4-31b-it` and re-synthesizes before the response leaves the server. The escalation is recorded in `tool_trace` and surfaced via `model_used` in the response payload.
+
 ### 3.8 Response generator
 
 **Purpose:** Farmer-facing formatting and metadata.
@@ -375,17 +384,20 @@ CREATE TABLE query_history (
 
 ## 5. API contract
 
-REST + JSON; **frontend is separate** — integrate via OpenAPI (`/docs`) or [`docs/api_contract.md`](docs/api_contract.md).
+REST + JSON; **frontend is separate** (RN app) — integrate via OpenAPI (`/docs`) or [`docs/api_contract.md`](docs/api_contract.md) (v0.2). RN integration notes: [`docs/frontend_handoff.md`](docs/frontend_handoff.md).
 
 ### Endpoints
 
 | Method | Path | Description |
 | :--- | :--- | :--- |
-| `POST` | `/api/v1/query` | Main agent query |
-| `GET` | `/api/v1/query/stream` | **SSE** stream of planner/tool steps (query params; use POST `/query` for large `image_b64`) |
+| `GET` | `/api/v1/health` | Liveness + Gemma 4 reachability |
+| `POST` | `/api/v1/query` | Main agent query (references uploaded images via `image_ref`) |
+| `POST` | `/api/v1/query/image` | Multipart image upload (JPEG/PNG ≤ 5 MB) → returns `image_ref` |
+| `GET` | `/api/v1/sync/bundle` | District-scoped offline bundle (gzipped JSON, ETag-style `bundle_version`) |
 | `GET` | `/api/v1/farmer/{farmer_id}/twin` | Read digital twin |
 | `PUT` | `/api/v1/farmer/{farmer_id}/twin` | Update twin (partial OK) |
-| `GET` | `/api/v1/health` | Health (Ollama reachability + API version) |
+
+All non-2xx responses use the unified error envelope defined in [`docs/api_contract.md`](docs/api_contract.md) §6, including a `fallback_hint` (`USE_ONDEVICE` / `RETRY_ONLINE_LATER` / `null`) that the RN app uses to choose between on-device re-run and a retry CTA.
 
 ### `POST /api/v1/query`
 
@@ -396,14 +408,14 @@ REST + JSON; **frontend is separate** — integrate via OpenAPI (`/docs`) or [`d
   "farmer_id": "uuid",
   "query": {
     "text": "मेरी गेहूं की फसल पीली पड़ रही है",
-    "voice_b64": null,
-    "image_b64": "<base64>",
+    "image_ref": "img_7a3f...",
     "language": "hi"
   },
   "context": {
-    "location": { "lat": 30.65, "lng": 75.95 },
+    "location": { "lat": 30.65, "lng": 75.95, "district": "Ludhiana", "state": "Punjab" },
     "connectivity": "online",
-    "device_intent": "crop_disease"
+    "device_intent": "crop_disease",
+    "device_capabilities": { "ondevice_model": "gemma-4-e4b-it" }
   }
 }
 ```
@@ -415,16 +427,22 @@ REST + JSON; **frontend is separate** — integrate via OpenAPI (`/docs`) or [`d
   "response_id": "uuid",
   "text": "आपकी गेहूं में पीला रतुआ (Yellow Rust) रोग के लक्षण हैं...",
   "structured": {
-    "disease": "Yellow Rust",
-    "confidence": 0.87,
-    "treatment": ["Propiconazole spray", "Remove infected leaves"],
-    "urgency": "high"
+    "kind": "disease",
+    "data": {
+      "disease": "Yellow Rust",
+      "treatment": ["Propiconazole spray", "Remove infected leaves"],
+      "urgency": "high"
+    }
   },
   "data_source": "live",
   "confidence_level": "high",
-  "tool_trace": ["vision_engine", "climate_engine"],
+  "confidence_score": 0.87,
+  "model_used": "gemma-4-26b-a4b-it",
+  "tool_trace": ["vision", "climate"],
+  "safety_flags": [],
+  "fallback_hint": null,
   "language": "hi",
-  "timestamp": "2026-04-18T10:30:00Z"
+  "timestamp": "2026-04-20T12:00:00Z"
 }
 ```
 
@@ -434,14 +452,15 @@ REST + JSON; **frontend is separate** — integrate via OpenAPI (`/docs`) or [`d
 
 | Layer | Technology |
 | :--- | :--- |
-| Local LLM | Ollama — Gemma-class / Gemma2 small models |
-| Cloud LLM | Google AI Studio (Gemini API) — `AI_STUDIO_MODEL` env |
+| On-device LLM (RN app) | **Gemma 4 E4B** / **E2B** via MediaPipe LLM Inference |
+| Cloud LLM (primary) | Google AI Studio — `gemma-4-26b-a4b-it` (`AI_STUDIO_MODEL` env) |
+| Cloud LLM (escalation) | Google AI Studio — `gemma-4-31b-it` (`AI_STUDIO_ESCALATION_MODEL` env) |
 | Agent | LangGraph (Python) |
 | API | FastAPI (Python 3.11+) |
 | Vector DB (RAG) | ChromaDB (embedded, on-disk) |
 | App DB | SQLite (farmer twin, caches, rate limits, query log) |
 | Analytics / offline SQL | DuckDB (read Parquet) |
-| Vision | Multimodal prompt via Google AI Studio; optional Ollama vision models |
+| Vision | Multimodal prompt via Google AI Studio (`gemma-4-26b-a4b-it`) |
 | Weather | Open-Meteo (free) |
 | Markets | Bundled `mandi_prices.csv` (+ optional future Agmarknet) |
 | Containers | Docker / Docker Compose (optional) |
@@ -461,7 +480,7 @@ krishisaathi-ai/
 │   └── middleware/
 │       └── rate_limit.py
 ├── agent/
-│   ├── gemma_client.py       # Ollama + Google AI Studio
+│   ├── gemma_client.py       # Google AI Studio (Gemma 4 primary + escalation)
 │   ├── connectivity_router.py
 │   ├── orchestrator.py
 │   ├── planner.py
@@ -501,7 +520,7 @@ krishisaathi-ai/
 | Question | Answer |
 | :--- | :--- |
 | **Why LangGraph?** | First-class graph + state for ReAct, conditional edges (online/offline), streaming — less custom loop code. |
-| **Why Ollama + AI Studio?** | Local for latency / offline-style use; cloud for stronger reasoning when a key is set — both map to Gemma-class models without paid Vertex. |
+| **Why hybrid on-device + AI Studio?** | On-device `gemma-4-e4b-it` via MediaPipe gives zero-network latency and airplane-mode support; `gemma-4-26b-a4b-it` on AI Studio (with `gemma-4-31b-it` escalation) gives stronger reasoning on a free tier — all Gemma 4, no paid Vertex. |
 | **Why safety after tools?** | Tools return numbers (prices, dosages) the LLM might misquote; checks run closest to the final user-facing text. |
 | **Why code for finance?** | LLMs are weak at arithmetic; Python computes eligibility / ROI / insurance; the model only narrates. |
 | **Why local-first twin?** | Weeks offline is normal; personalization must work without sync; cloud updates when possible. |
@@ -515,7 +534,7 @@ krishisaathi-ai/
 | API | Stateless `POST /api/v1/query`; SQLite-backed rate limit per `farmer_id` (~10 req/min) |
 | Long tools | In-process timeouts (`TOOL_TIMEOUT_SECONDS`); extend with job queue later |
 | Data | SQLite file + Chroma directory — mount a volume in Docker (`docker-compose.yml`) |
-| Models | `config/settings.py` + env (`OLLAMA_MODEL`, `AI_STUDIO_MODEL`) |
+| Models | `config/settings.py` + env (`AI_STUDIO_MODEL`, `AI_STUDIO_ESCALATION_MODEL`) |
 | Prod (future) | Add PostgreSQL/Redis only if traffic demands; hackathon build stays minimal |
 
 ---

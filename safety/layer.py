@@ -49,3 +49,11 @@ def check(
         text = "⚠️ Confidence low — please verify with a local agronomist.\n\n" + text
 
     return SafetyResult(passed=len([f for f in flags if f == "medical_risk"]) == 0, modified_text=text, flags=flags)
+
+
+def should_escalate(confidence_score: float, threshold: float = 0.70) -> bool:
+    """Returns True when the confidence is low enough to warrant re-synthesis on a heavier model."""
+    try:
+        return float(confidence_score) < float(threshold)
+    except (TypeError, ValueError):
+        return False

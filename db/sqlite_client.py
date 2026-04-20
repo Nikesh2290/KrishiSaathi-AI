@@ -1,4 +1,4 @@
-"""SQLite persistence: farmer twin, caches, query history, rate limits."""
+"""SQLite persistence: farmer twin, caches, query history."""
 
 from __future__ import annotations
 
@@ -45,12 +45,6 @@ CREATE TABLE IF NOT EXISTS query_history (
     response TEXT,
     timestamp INTEGER NOT NULL,
     data_source TEXT
-);
-
-CREATE TABLE IF NOT EXISTS rate_limit (
-    farmer_id TEXT PRIMARY KEY,
-    window_start INTEGER NOT NULL,
-    count INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS sync_meta (
@@ -130,50 +124,6 @@ async def log_query(
             (farmer_id, query_text, intent, response, now, data_source),
         )
         await db.commit()
-
-
-async def check_rate_limit(
-    farmer_id: str, settings: Optional[Settings] = None
-) -> tuple[bool, Optional[str]]:
-    """Return (allowed, error_message)."""
-    settings = settings or get_settings()
-    limit = settings.rate_limit_per_minute
-    now = int(time.time())
-    window = 60
-    window_start = now - (now % window)
-
-    async with get_connection(settings) as db:
-        cur = await db.execute(
-            "SELECT window_start, count FROM rate_limit WHERE farmer_id = ?",
-            (farmer_id,),
-        )
-        row = await cur.fetchone()
-        if not row:
-            await db.execute(
-                "INSERT INTO rate_limit (farmer_id, window_start, count) VALUES (?, ?, ?)",
-                (farmer_id, window_start, 1),
-            )
-            await db.commit()
-            return True, None
-
-        ws, cnt = row["window_start"], row["count"]
-        if ws != window_start:
-            await db.execute(
-                "UPDATE rate_limit SET window_start = ?, count = 1 WHERE farmer_id = ?",
-                (window_start, farmer_id),
-            )
-            await db.commit()
-            return True, None
-
-        if cnt >= limit:
-            return False, f"Rate limit exceeded: {limit} requests per minute."
-
-        await db.execute(
-            "UPDATE rate_limit SET count = count + 1 WHERE farmer_id = ?",
-            (farmer_id,),
-        )
-        await db.commit()
-        return True, None
 
 
 async def get_sync_meta(key: str, settings: Optional[Settings] = None) -> Optional[str]:

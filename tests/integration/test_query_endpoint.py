@@ -6,7 +6,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app
-from models.response import AgentResponse
 
 
 @pytest.fixture
@@ -22,10 +21,23 @@ def test_health(client):
 
 
 def test_query_mocked(monkeypatch, client):
-    async def fake_run(req):
-        return AgentResponse(text="ok", tool_trace=["scheme"])
+    async def fake_run_graph(_req):
+        return {
+            "draft_text": "ok",
+            "tool_results": {"scheme_0": {"answer": "x"}},
+            "tool_trace": ["scheme"],
+            "data_source": "live",
+            "safety_flags": [],
+            "model_used": "mock-model",
+            "confidence_score": 0.75,
+            "fallback_hint": None,
+        }
 
-    monkeypatch.setattr("api.routes.query.run", fake_run)
+    async def fake_log_query(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("api.routes.query.run_graph", fake_run_graph)
+    monkeypatch.setattr("api.routes.query.log_query", fake_log_query)
     body = {
         "farmer_id": "f1",
         "query": {"text": "PM-KISAN", "language": "hi"},
@@ -33,18 +45,9 @@ def test_query_mocked(monkeypatch, client):
     }
     r = client.post("/api/v1/query", json=body)
     assert r.status_code == 200
-    assert r.json()["text"] == "ok"
-
-
-def test_stream_emits(monkeypatch, client):
-    async def fake_stream(_req):
-        yield {"step": "route", "status": "done"}
-        yield {"step": "plan", "status": "done", "tools": ["climate"]}
-
-    monkeypatch.setattr("api.routes.query.stream_run", fake_stream)
-    r = client.get(
-        "/api/v1/query/stream",
-        params={"farmer_id": "f1", "q": "weather", "connectivity": "online"},
-    )
-    assert r.status_code == 200
-    assert b"data:" in r.content
+    payload = r.json()
+    assert payload["text"] == "ok"
+    assert payload["structured"]["kind"] == "scheme"
+    assert payload["model_used"] == "mock-model"
+    assert 0.0 <= payload["confidence_score"] <= 1.0
+    assert payload["fallback_hint"] in (None, "USE_ONDEVICE", "RETRY_ONLINE_LATER")

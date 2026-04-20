@@ -35,4 +35,4 @@ def test_bootstrap_creates_files(tmp_path, monkeypatch):
     bd.bootstrap_all()
     assert (tmp_path / "data" / "scheme_index.json").exists()
     assert (tmp_path / "data" / "mandi_prices.csv").exists()
-    assert (tmp_path / "data" / "weather_history.parquet").exists()
+    assert (tmp_path / "data" / "weather_history.json").exists()

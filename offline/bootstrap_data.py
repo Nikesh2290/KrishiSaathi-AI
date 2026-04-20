@@ -1,14 +1,11 @@
-"""Create offline seed files if missing (CSV, Parquet, JSON)."""
+"""Create offline seed files if missing (CSV, JSON)."""
 
 from __future__ import annotations
 
 import csv
 import json
 import random
-import time
 from pathlib import Path
-
-import duckdb
 
 ROOT = Path(__file__).resolve().parent / "data"
 
@@ -152,8 +149,8 @@ def write_mandi_csv(rows: int = 500) -> None:
             )
 
 
-def write_weather_parquet() -> None:
-    path = ROOT / "weather_history.parquet"
+def write_weather_history_json() -> None:
+    path = ROOT / "weather_history.json"
     if path.exists():
         return
     ensure_dirs()
@@ -167,7 +164,6 @@ def write_weather_parquet() -> None:
         "Lucknow",
         "Patna",
     ]
-    now = int(time.time())
     rows = []
     for d in districts:
         for m in range(1, 13):
@@ -177,20 +173,9 @@ def write_weather_parquet() -> None:
                     "month": m,
                     "avg_temp_c": 18 + (m % 6) * 2.5,
                     "avg_rain_mm": 20 + (m * 7) % 120,
-                    "last_updated": now,
                 }
             )
-    con = duckdb.connect(database=":memory:")
-    con.execute(
-        "CREATE TABLE t (district VARCHAR, month INTEGER, avg_temp_c DOUBLE, avg_rain_mm DOUBLE, last_updated BIGINT)"
-    )
-    for r in rows:
-        con.execute(
-            "INSERT INTO t VALUES (?, ?, ?, ?, ?)",
-            [r["district"], r["month"], r["avg_temp_c"], r["avg_rain_mm"], r["last_updated"]],
-        )
-    p = str(path).replace("\\", "/")
-    con.execute(f"COPY t TO '{p}' (FORMAT PARQUET)")
+    path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def bootstrap_all() -> None:
@@ -198,7 +183,7 @@ def bootstrap_all() -> None:
     write_scheme_index()
     write_crop_calendar()
     write_mandi_csv(500)
-    write_weather_parquet()
+    write_weather_history_json()
 
 
 if __name__ == "__main__":
