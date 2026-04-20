@@ -1,43 +1,63 @@
-# KrishiSaathi AI — Gemma 4 Good Hackathon write-up (template)
+# KrishiSaathi AI — Gemma 4 Good Hackathon submission
+
+## Hook
+
+KrishiSaathi puts a **Gemma 4** agronomist in the pocket of India's 100M smallholder farmers — in their language, and when the network is gone.
 
 ## Problem
 
-Smallholder farmers in India face fragmented information: weather risk, crop diseases, mandi prices, and government schemes are spread across apps, PDFs, and offices. Connectivity and literacy barriers make generic cloud-only chatbots unusable.
-
-## User story
-
-**Ramesh Kumar** (Punjab) grows wheat and mustard. He needs actionable guidance in **Hindi**, sometimes from a **photo** of diseased leaves, and answers when the network is **unreliable**.
+Smallholder farmers face fragmented information: weather risk, crop diseases, mandi prices, and government schemes live across apps, PDFs, and offices. Connectivity and literacy barriers make cloud-only chatbots unusable.
 
 ## Solution
 
-**KrishiSaathi** is a **backend-only** AI agent API that:
+KrishiSaathi is a **hybrid on-device + cloud** AI agent:
 
-1. Routes between **local Ollama (Gemma-class)** and **Google AI Studio (Gemini API)** for planning and vision.
-2. Uses a **LangGraph**-style pipeline: route → plan tools → execute tools → synthesize answer → **safety** checks.
-3. Integrates **free** data sources: **Open-Meteo** (weather), **offline CSV/Parquet/JSON** (mandi, weather history, schemes), **ChromaDB** (scheme RAG).
-4. Exposes a clean **REST + SSE** contract for any frontend (mobile / web).
+- **On-device** (separate RN app, this repo's sibling): `gemma-4-e4b-it` via **MediaPipe LLM Inference** — private, offline, Hindi/Hinglish, runs on mid-range Android.
+- **Online** (this backend): `gemma-4-26b-a4b-it` via **Google AI Studio free tier**, with **escalation to `gemma-4-31b-it`** for low-confidence queries.
+- **Offline sync bundle**: district-scoped ~1–2 MB gzipped JSON (schemes, mandi prices, crop calendar, 5-year weather averages) — the RN app downloads it once and keeps working without a signal.
 
-## Why Gemma / Gemma-class
+## Why Gemma 4
 
-- **Open weights & local deploy** via Ollama — aligns with low-connectivity and sponsor emphasis on edge tools.
-- **Multimodal** path for crop-disease photos (vision prompt → structured JSON).
-- **Tool use** via an explicit planner JSON + dispatcher (auditable `tool_trace` in every response).
+- Four Apache 2.0 variants from edge (E2B/E4B) to server (26B MoE, 31B dense) — one model family covers the whole stack.
+- E4B runs on 4 GB RAM phones — real-world Indian device median.
+- 140+ languages, native multimodal — Hindi voice + leaf photos work out of the box.
 
 ## Impact
 
-- Targets **digital equity** and **climate/agriculture resilience** (weather + offline fallbacks).
-- **Safety layer** reduces unsourced medical-style dosages and flags low-confidence vision.
+- **Digital equity**: works in airplane mode in a Ludhiana field.
+- **Climate resilience**: weather + crop-plan advice from cached data alone.
+- **Responsible AI**: safety layer strips unsourced pesticide dosages; escalates low-confidence answers to the 31B model before the farmer sees them.
 
-## Technical summary
+## Architecture
 
-- **Stack:** FastAPI, SQLite, ChromaDB, LangGraph, httpx, DuckDB.
-- **Run:** see [README.md](README.md).
-- **API:** [docs/api_contract.md](docs/api_contract.md) and `/docs` Swagger.
+```
+RN app (MediaPipe, Gemma 4 E4B/E2B)
+  ├── offline intents → on-device
+  └── online intents → POST /api/v1/query → this backend
+                                              ├── LangGraph StateGraph
+                                              │   (route → plan → tools → synth → safety → respond)
+                                              ├── Gemma 4 26B A4B on AI Studio
+                                              │   ↳ escalates to 31B if confidence < 0.70
+                                              └── Tools: climate, vision, scheme-RAG,
+                                                         market, crop-planner, financial
+```
+
+Full design: [ARCHITECTURE.md](ARCHITECTURE.md). API contract: [docs/api_contract.md](docs/api_contract.md). RN handoff: [docs/frontend_handoff.md](docs/frontend_handoff.md).
 
 ## Demo
 
-Record a short video showing: health check → POST query (Hindi scheme question) → optional SSE stream. Frontend can be built separately against this API.
+3-minute video covering:
+
+1. `GET /health` — backend alive, `gemma-4-26b-a4b-it` configured.
+2. Online scheme query in Hindi → `gemma-4-26b-a4b-it` answers with citations.
+3. Photo of diseased wheat leaf → `POST /query/image` → `POST /query` → structured disease card.
+4. Airplane mode → RN app answers weather + crop plan offline via on-device `gemma-4-e4b-it`.
+5. Safety layer stripping an unverified pesticide dosage (20-second close-up).
+
+## Field test
+
+Usefulness self-reported by 5 farmers in Ludhiana (Apr 2026): **[fill from field test]**.
 
 ## Repo & license
 
-See [LICENSE](LICENSE).
+Apache 2.0. See [LICENSE](LICENSE).

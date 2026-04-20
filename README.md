@@ -1,18 +1,23 @@
 # KrishiSaathi AI — Backend
 
-Hybrid **edge + cloud + offline** farmer assistant API: **Gemma-class** models (Ollama + Google AI Studio), **LangGraph** tool loop, **Open-Meteo** weather, **ChromaDB** scheme RAG, **SQLite** persistence.
+Hybrid **Gemma 4** farmer assistant API for the Gemma 4 Good Hackathon.
+
+- **Backend primary:** `gemma-4-26b-a4b-it` (Google AI Studio free tier)
+- **Backend escalation:** `gemma-4-31b-it` (Google AI Studio free tier)
+- **On-device (separate RN app):** `gemma-4-e4b-it` / `gemma-4-e2b-it` via MediaPipe LLM Inference
+
+Features: **LangGraph** agent loop, **Open-Meteo** weather, **ChromaDB** scheme RAG, **SQLite** persistence, district-scoped **offline sync bundle**, multipart image upload.
 
 ## Quickstart
 
-1. **Python 3.11+** and (optional) **[Ollama](https://ollama.com/)** with a small model, e.g. `ollama pull gemma2:2b`.
+1. **Python 3.11+**.
 
 2. **Environment**
 
    ```bash
-   copy .env.example .env
+   cp .env.example .env
+   # Set GOOGLE_AI_STUDIO_KEY (https://aistudio.google.com/app/apikey)
    ```
-
-   Set `GOOGLE_AI_STUDIO_KEY` if you want cloud fallback when Ollama is down (get a key from [Google AI Studio](https://aistudio.google.com/app/apikey)).
 
 3. **Install & run**
 
@@ -24,19 +29,18 @@ Hybrid **edge + cloud + offline** farmer assistant API: **Gemma-class** models (
 4. **Docs**
 
    - Swagger: <http://localhost:8000/docs>
-   - Human-readable contract: [docs/api_contract.md](docs/api_contract.md)
-   - Postman: [docs/postman_collection.json](docs/postman_collection.json)
+   - Contract: [docs/api_contract.md](docs/api_contract.md)
+   - RN handoff: [docs/frontend_handoff.md](docs/frontend_handoff.md)
+   - Architecture: [ARCHITECTURE.md](ARCHITECTURE.md)
+   - Hackathon write-up: [WRITEUP.md](WRITEUP.md)
 
-5. **Offline seed data** is created on first startup (`offline/bootstrap_data.py`). Rebuild anytime:
-
-   ```bash
-   python -m offline.bootstrap_data
-   ```
+5. **Offline seed data** is created on first startup (`offline/bootstrap_data.py`).
 
 ## Tests
 
 ```bash
 python -m pytest tests/ -v
+python -m pytest tests/integration/test_demo_smoke.py -v  # must pass before submission
 ```
 
 ## Docker
@@ -45,10 +49,6 @@ python -m pytest tests/ -v
 docker compose up --build
 ```
 
-## Architecture
+## License
 
-See [ARCHITECTURE.md](ARCHITECTURE.md).
-
-## Hackathon
-
-See [WRITEUP.md](WRITEUP.md) for a Kaggle / Gemma 4 Good–style submission template.
+See [LICENSE](LICENSE).
