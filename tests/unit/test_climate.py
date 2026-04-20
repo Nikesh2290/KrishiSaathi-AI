@@ -46,7 +46,7 @@ def test_offline_weather_import():
     from offline.bootstrap_data import bootstrap_all
     from pathlib import Path
 
-    if not Path("offline/data/weather_history.parquet").exists():
+    if not Path("offline/data/weather_history.json").exists():
         bootstrap_all()
     from modules.climate.offline_fallback import offline_weather
 
