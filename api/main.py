@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from api.routes import farmer, health, query
 from config.settings import get_settings
 from db.sqlite_client import init_db
+from models.errors import register_exception_handlers
 from modules.scheme import vector_store
 from offline.bootstrap_data import bootstrap_all
 
@@ -36,6 +37,7 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    register_exception_handlers(app)
     app.include_router(query.router)
     app.include_router(farmer.router)
     app.include_router(health.router)
