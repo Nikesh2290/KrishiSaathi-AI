@@ -56,3 +56,14 @@ async def detect_disease(
     if conf < 0.5:
         data["treatment"] = list(data.get("treatment") or []) + ["[unverified] Low confidence — verify with field expert."]
     return data
+
+
+async def detect_disease_by_ref(image_ref, prefer_local, settings):
+    """Resolve an image_ref to bytes and dispatch to detect_disease.
+
+    During Phase 1 this is a thin wrapper that returns a no-image result;
+    Phase 2 (Task 11) wires it to the real image store.
+    """
+    if not image_ref:
+        return {"disease": None, "confidence": 0.0, "note": "no_image"}
+    return {"disease": None, "confidence": 0.0, "note": "image_ref_unresolved"}

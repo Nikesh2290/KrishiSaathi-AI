@@ -57,11 +57,12 @@ async def _ollama_chat(
         return data.get("message", {}).get("content", "") or ""
 
 
-def _studio_llm(settings: Settings) -> ChatGoogleGenerativeAI:
+def _studio_llm(settings: Settings, heavy: bool = False) -> ChatGoogleGenerativeAI:
     if not settings.google_api_key:
         raise RuntimeError("GOOGLE_AI_STUDIO_KEY not set")
+    model = settings.ai_studio_model_heavy if heavy else settings.ai_studio_model
     return ChatGoogleGenerativeAI(
-        model=settings.ai_studio_model,
+        model=model,
         google_api_key=settings.google_api_key,
         temperature=0.2,
     )
@@ -69,8 +70,9 @@ def _studio_llm(settings: Settings) -> ChatGoogleGenerativeAI:
 
 async def generate(
     messages: Sequence[Union[dict, BaseMessage]],
-    prefer_local: bool = True,
+    prefer_local: bool = False,
     settings: Optional[Settings] = None,
+    heavy: bool = False,
 ) -> str:
     settings = settings or get_settings()
     if prefer_local:
@@ -78,7 +80,7 @@ async def generate(
             return await _ollama_chat(settings, messages)
         except Exception as e:
             logger.warning("Ollama generate failed, falling back to AI Studio: %s", e)
-    llm = _studio_llm(settings)
+    llm = _studio_llm(settings, heavy=heavy)
     lc = _to_lc_messages(messages)
     resp = await llm.ainvoke(lc)
     return str(resp.content)
