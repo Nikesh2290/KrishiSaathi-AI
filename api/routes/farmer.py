@@ -1,0 +1,27 @@
+"""Farmer digital twin CRUD."""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, HTTPException
+
+from config.settings import get_settings
+from db.sqlite_client import get_farmer_twin, upsert_farmer_twin
+from models.farmer import FarmerTwin
+
+router = APIRouter(prefix="/api/v1/farmer", tags=["farmer"])
+
+
+@router.get("/{farmer_id}/twin")
+async def get_twin(farmer_id: str):
+    twin = await get_farmer_twin(farmer_id)
+    if not twin:
+        raise HTTPException(status_code=404, detail="Farmer not found")
+    return twin
+
+
+@router.put("/{farmer_id}/twin")
+async def put_twin(farmer_id: str, body: FarmerTwin):
+    if body.farmer_id != farmer_id:
+        raise HTTPException(status_code=400, detail="farmer_id mismatch")
+    await upsert_farmer_twin(body, get_settings())
+    return {"ok": True, "farmer_id": farmer_id}

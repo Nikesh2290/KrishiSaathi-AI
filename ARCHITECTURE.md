@@ -4,11 +4,13 @@
 
 | Piece | Choice |
 | :--- | :--- |
-| Edge model | Gemma 4 · 2B (quantized, on-device) |
-| Cloud planner | Gemma 4 · 27B+ (Vertex AI / cloud) |
-| Orchestration | LangGraph ReAct loop |
-| API / data | FastAPI · PostgreSQL · Redis · ChromaDB |
-| **Architecture diagram** | [Section 2 — System architecture](#2-system-architecture) and Cursor Canvas `krishisaathi-architecture.canvas.tsx` |
+| Edge / local | Gemma-class via **Ollama** (e.g. Gemma 2 2B) — free, offline-friendly |
+| Cloud fallback | **Google AI Studio** (Gemini API) with a Gemma-class / Gemma model id — free tier, no paid Vertex required |
+| Orchestration | **LangGraph**-style loop: route → plan → tools → synthesize |
+| API / data | **FastAPI** · **SQLite** (twin, rate limits, logs) · **ChromaDB** (scheme RAG) |
+| Weather (live) | **Open-Meteo** — no API key |
+| **Frontend** | Separate app; this repo is **backend-only** — see [`docs/api_contract.md`](docs/api_contract.md) |
+| **Architecture diagram** | [Section 2 — System architecture](#2-system-architecture) and Cursor Canvas `krishisaathi-architecture.canvas.tsx` (optional) |
 
 ---
 
@@ -52,7 +54,7 @@ The system is built around three constraints:
 | Non-English, low-literacy users | Voice + Hinglish / regional language support |
 | Fragmented information | One agentic surface across six intelligence modules |
 
-The AI “brain” uses **Gemma 4** (2B on edge, 27B+ in cloud), orchestrated with a **LangGraph ReAct** loop.
+The AI “brain” uses **Gemma-class** models: small **Ollama** weights locally and a **Google AI Studio** model when cloud is available, orchestrated with a **LangGraph**-style tool loop (see `agent/react_loop.py`).
 
 ---
 
@@ -173,8 +175,8 @@ else:
 | | |
 | :--- | :--- |
 | **Purpose** | Heavy reasoning, multi-step planning, tool orchestration |
-| **Model** | Gemma 4 · 27B+ (Google Cloud / Vertex AI) |
-| **Pattern** | ReAct — planner emits JSON tool calls; LangGraph executes |
+| **Model** | Gemma-class via **Google AI Studio** (`AI_STUDIO_MODEL` in `config/settings.py`) — no Vertex AI required for the hackathon build |
+| **Pattern** | Planner emits JSON tool calls; `langgraph` graph executes route → plan → tools → synthesize |
 
 **Responsibilities**
 
@@ -232,9 +234,9 @@ Offline answers include a clear disclaimer, e.g.
 #### Climate engine
 
 - **Input:** GPS, crop type  
-- **Sources:** OpenWeatherMap, IMD  
+- **Sources:** **Open-Meteo** (free, no key); IMD can be added later  
 - **Output:** 7-day outlook, rain risk, irrigation suggestion  
-- **Offline:** Historical average for month / region  
+- **Offline:** Historical average for month / region (`offline/data/weather_history.parquet`)  
 
 #### Vision engine (crop disease)
 
@@ -373,16 +375,17 @@ CREATE TABLE query_history (
 
 ## 5. API contract
 
-REST + JSON internally; the app uses one **gateway**.
+REST + JSON; **frontend is separate** — integrate via OpenAPI (`/docs`) or [`docs/api_contract.md`](docs/api_contract.md).
 
 ### Endpoints
 
 | Method | Path | Description |
 | :--- | :--- | :--- |
 | `POST` | `/api/v1/query` | Main agent query |
+| `GET` | `/api/v1/query/stream` | **SSE** stream of planner/tool steps (query params; use POST `/query` for large `image_b64`) |
 | `GET` | `/api/v1/farmer/{farmer_id}/twin` | Read digital twin |
 | `PUT` | `/api/v1/farmer/{farmer_id}/twin` | Update twin (partial OK) |
-| `GET` | `/api/v1/health` | Health (used by device router) |
+| `GET` | `/api/v1/health` | Health (Ollama reachability + API version) |
 
 ### `POST /api/v1/query`
 
@@ -431,22 +434,17 @@ REST + JSON internally; the app uses one **gateway**.
 
 | Layer | Technology |
 | :--- | :--- |
-| Edge AI | Gemma 4 · 2B (GGUF / ONNX, quantized) |
-| Cloud planner | Gemma 4 · 27B+ (Vertex AI) |
+| Local LLM | Ollama — Gemma-class / Gemma2 small models |
+| Cloud LLM | Google AI Studio (Gemini API) — `AI_STUDIO_MODEL` env |
 | Agent | LangGraph (Python) |
 | API | FastAPI (Python 3.11+) |
-| Vector DB (RAG) | ChromaDB (self-hosted) |
-| On-device DB | SQLite, DuckDB |
-| Cloud DB | PostgreSQL (twin, logs) |
-| Cache | Redis |
-| Vision | Google Vision API + custom fine-tune |
-| Weather | OpenWeatherMap, IMD |
-| Markets | Agmarknet, eNAM |
-| Forecasting | Prophet / ARIMA |
-| Cloud | GCP, GKE |
-| Containers | Docker, Kubernetes |
-| Async jobs | Google Pub/Sub |
-| Observability | Cloud Monitoring + dashboards |
+| Vector DB (RAG) | ChromaDB (embedded, on-disk) |
+| App DB | SQLite (farmer twin, caches, rate limits, query log) |
+| Analytics / offline SQL | DuckDB (read Parquet) |
+| Vision | Multimodal prompt via Google AI Studio; optional Ollama vision models |
+| Weather | Open-Meteo (free) |
+| Markets | Bundled `mandi_prices.csv` (+ optional future Agmarknet) |
+| Containers | Docker / Docker Compose (optional) |
 
 ---
 
@@ -454,63 +452,41 @@ REST + JSON internally; the app uses one **gateway**.
 
 ```text
 krishisaathi-ai/
-├── api/                          # FastAPI gateway
+├── api/
 │   ├── main.py
 │   ├── routes/
-│   │   ├── query.py
-│   │   └── farmer.py
+│   │   ├── query.py          # POST /query, GET /query/stream (SSE)
+│   │   ├── farmer.py
+│   │   └── health.py
 │   └── middleware/
-│       ├── auth.py
 │       └── rate_limit.py
-├── agent/                        # LangGraph core
+├── agent/
+│   ├── gemma_client.py       # Ollama + Google AI Studio
+│   ├── connectivity_router.py
 │   ├── orchestrator.py
 │   ├── planner.py
 │   ├── dispatcher.py
 │   └── react_loop.py
 ├── modules/
 │   ├── climate/
-│   │   ├── engine.py
-│   │   └── offline_fallback.py
 │   ├── vision/
-│   │   ├── engine.py
-│   │   └── tagger.py
 │   ├── market/
-│   │   ├── engine.py
-│   │   ├── forecaster.py
-│   │   └── offline_fallback.py
 │   ├── scheme/
-│   │   ├── navigator.py
-│   │   ├── vector_store.py
-│   │   └── offline_search.py
 │   ├── financial/
-│   │   └── advisor.py
 │   └── crop_planner/
-│       └── planner.py
 ├── safety/
-│   └── layer.py
 ├── response/
-│   └── generator.py
 ├── models/
-│   ├── farmer.py
-│   ├── request.py
-│   └── response.py
 ├── db/
-│   ├── postgres.py
-│   └── migrations/
-├── cache/
-│   └── redis_client.py
+│   └── sqlite_client.py
 ├── offline/
-│   ├── data/
-│   │   ├── mandi_prices.csv
-│   │   ├── weather_history.parquet
-│   │   ├── scheme_index.json
-│   │   └── crop_calendar.json
-│   └── sync.py
-├── config/
-│   └── settings.py
+│   ├── bootstrap_data.py
+│   ├── sync.py
+│   └── data/                 # generated JSON / CSV / Parquet
+├── docs/
+│   ├── api_contract.md
+│   └── postman_collection.json
 ├── tests/
-│   ├── unit/
-│   └── integration/
 ├── docker-compose.yml
 ├── Dockerfile
 ├── requirements.txt
@@ -525,7 +501,7 @@ krishisaathi-ai/
 | Question | Answer |
 | :--- | :--- |
 | **Why LangGraph?** | First-class graph + state for ReAct, conditional edges (online/offline), streaming — less custom loop code. |
-| **Why 2B + 27B?** | 2B for on-device latency and offline basics; 27B for multi-step cloud reasoning; balances cost and quality. |
+| **Why Ollama + AI Studio?** | Local for latency / offline-style use; cloud for stronger reasoning when a key is set — both map to Gemma-class models without paid Vertex. |
 | **Why safety after tools?** | Tools return numbers (prices, dosages) the LLM might misquote; checks run closest to the final user-facing text. |
 | **Why code for finance?** | LLMs are weak at arithmetic; Python computes eligibility / ROI / insurance; the model only narrates. |
 | **Why local-first twin?** | Weeks offline is normal; personalization must work without sync; cloud updates when possible. |
@@ -536,17 +512,16 @@ krishisaathi-ai/
 
 | Topic | Approach |
 | :--- | :--- |
-| API | Stateless `POST /api/v1/query`; horizontal scale behind a load balancer |
-| Long tools | Vision / forecast via Pub/Sub; return `job_id`, poll or push |
-| Rate limits | Per `farmer_id` (e.g. ~10 req/min) |
-| Cache | Redis for weather/price (~1h TTL) |
-| Models | Version in `config/settings.py`, override via env for A/B |
-| Cold start | Warm pool for agent core; scale to ~5 replicas under load |
+| API | Stateless `POST /api/v1/query`; SQLite-backed rate limit per `farmer_id` (~10 req/min) |
+| Long tools | In-process timeouts (`TOOL_TIMEOUT_SECONDS`); extend with job queue later |
+| Data | SQLite file + Chroma directory — mount a volume in Docker (`docker-compose.yml`) |
+| Models | `config/settings.py` + env (`OLLAMA_MODEL`, `AI_STUDIO_MODEL`) |
+| Prod (future) | Add PostgreSQL/Redis only if traffic demands; hackathon build stays minimal |
 
 ---
 
 | | |
 | :--- | :--- |
-| **Document version** | 0.2 |
+| **Document version** | 0.3 |
 | **Last updated** | April 2026 |
-| **Note** | Source of truth for backend architecture; update before structural changes. |
+| **Note** | Hackathon-oriented backend: free-tier models & data, SQLite, no Gradio UI in-repo. |

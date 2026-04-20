@@ -1,0 +1,17 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_PATH=/data/krishisaathi.db
+      - CHROMA_PATH=/data/chroma
+      - CORS_ORIGINS=http://localhost:3000,http://localhost:5173
+      - CONNECTIVITY_MODE=auto
+    env_file:
+      - .env
+    volumes:
+      - krishi-data:/data
+
+volumes:
+  krishi-data:
