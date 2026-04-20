@@ -49,3 +49,5 @@ def test_query_mocked(monkeypatch, client):
     assert payload["text"] == "ok"
     assert payload["structured"]["kind"] == "scheme"
     assert payload["model_used"] == "mock-model"
+    assert 0.0 <= payload["confidence_score"] <= 1.0
+    assert payload["fallback_hint"] in (None, "USE_ONDEVICE", "RETRY_ONLINE_LATER")
