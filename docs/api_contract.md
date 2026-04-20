@@ -74,31 +74,6 @@ Main agent call. Returns JSON `AgentResponse`.
 
 ---
 
-## `GET /api/v1/query/stream`
-
-Server-Sent Events (SSE) for live steps (`data: {json}\n\n`). Use for progress UI.
-
-**Query parameters**
-
-| Param | Required | Description |
-|-------|----------|-------------|
-| `farmer_id` | yes | Farmer id |
-| `q` | no | Query text |
-| `language` | no | Default `hi` |
-| `connectivity` | no | `online` / `offline` |
-| `lat`, `lng` | no | Location |
-| `device_intent` | no | Same as POST |
-
-**Example**
-
-```bash
-curl -N "http://localhost:8000/api/v1/query/stream?farmer_id=f1&q=weather&connectivity=online&lat=30.65&lng=75.95"
-```
-
-For **image** queries, use `POST /api/v1/query` (body can include `image_b64`).
-
----
-
 ## `GET /api/v1/farmer/{farmer_id}/twin`
 
 Returns `FarmerTwin` JSON or `404`.
