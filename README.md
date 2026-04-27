@@ -1,3 +1,12 @@
+---
+title: KrishiSaathi AI Backend
+emoji: 🌾
+colorFrom: green
+colorTo: blue
+sdk: docker
+pinned: false
+---
+
 # KrishiSaathi AI — Backend
 
 Hybrid **Gemma 4** farmer assistant API for the Gemma 4 Good Hackathon.
