@@ -2,7 +2,7 @@ services:
   api:
     build: .
     ports:
-      - "8000:8000"
+      - "8000:7860"
     environment:
       - DATABASE_PATH=/data/krishisaathi.db
       - CHROMA_PATH=/data/chroma
