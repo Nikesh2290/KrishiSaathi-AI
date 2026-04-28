@@ -8,6 +8,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes import farmer, health, query, sync
+from api.middleware.request_logging import install_request_logging
+from config.logging import configure_logging
 from config.settings import get_settings
 from db.sqlite_client import init_db
 from models.errors import register_exception_handlers
@@ -23,12 +25,19 @@ async def lifespan(app: FastAPI):
     try:
         vector_store.build_index()
     except Exception:
-        pass
+        import logging
+
+        logging.getLogger(__name__).exception("vector_store.build_index() failed")
     yield
 
 
 def create_app() -> FastAPI:
     settings = get_settings()
+    configure_logging(
+        level=settings.log_level,
+        json_logs=bool(settings.log_json),
+        log_file=(settings.log_file or None),
+    )
     app = FastAPI(title=settings.app_name, version=settings.app_version, lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware,
@@ -37,6 +46,7 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    install_request_logging(app)
     register_exception_handlers(app)
     app.include_router(query.router)
     app.include_router(farmer.router)

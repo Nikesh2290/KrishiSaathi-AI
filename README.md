@@ -58,6 +58,25 @@ python -m pytest tests/integration/test_demo_smoke.py -v  # must pass before sub
 docker compose up --build
 ```
 
+## Hugging Face Spaces (Docker)
+
+This repo’s [`Dockerfile`](Dockerfile) runs Uvicorn on port **7860** (`api.main:app`). Logs go to **stdout** (visible in the Space **Logs** tab) and, by default in the image, also to a **rotating file** at `./logs/app.log` inside the container (best-effort; not guaranteed to persist across rebuilds).
+
+**Space variables (optional overrides)**
+
+| Variable | Default in image | Purpose |
+|----------|------------------|---------|
+| `LOG_LEVEL` | `INFO` | Root / uvicorn log level |
+| `LOG_JSON` | `true` | Structured JSON lines |
+| `LOG_FILE` | `./logs/app.log` | Set empty to disable file logging |
+
+Set `GOOGLE_AI_STUDIO_KEY` and any other secrets in the Space **Settings → Variables and secrets**.
+
+**Verify after deploy**
+
+- Call `GET /api/v1/health` and check Space Logs for a request line; the response should include **`X-Request-Id`** (or echo your incoming `X-Request-Id` header).
+- Unhandled errors should include a stack trace in logs (see `models/errors.py`).
+
 ## License
 
 See [LICENSE](LICENSE).

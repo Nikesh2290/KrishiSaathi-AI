@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     max_react_iterations: int = Field(default=6, alias="MAX_REACT_ITERATIONS")
     tool_timeout_seconds: float = Field(default=8.0, alias="TOOL_TIMEOUT_SECONDS")
 
+    # Logging
+    log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    log_json: bool = Field(default=True, alias="LOG_JSON")
+    log_file: str = Field(default="", alias="LOG_FILE")
+
     # Sync + image + confidence thresholds
     sync_bundle_cache_ttl_seconds: int = Field(
         default=3600, alias="SYNC_BUNDLE_CACHE_TTL_SECONDS"
