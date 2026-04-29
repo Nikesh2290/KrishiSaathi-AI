@@ -17,6 +17,8 @@ Hybrid **Gemma 4** farmer assistant API for the Gemma 4 Good Hackathon.
 
 Features: **LangGraph** agent loop, **Open-Meteo** weather, **ChromaDB** scheme RAG, **SQLite** persistence, district-scoped **offline sync bundle**, multipart image upload.
 
+**Optional:** **Supabase** for online Auth (email/password → stable `farmer_id` UUID), **Postgres** for twin + query history, **pgvector** for scheme retrieval. Apply [`db/migrations/supabase_schema.sql`](db/migrations/supabase_schema.sql) in the Supabase SQL editor, then set `SUPABASE_*` vars in `.env`. Offline mode still uses SQLite + Chroma; `POST /api/v1/sync/push` (or startup) uploads unsynced rows and scheme embeddings.
+
 ## Quickstart
 
 1. **Python 3.11+**.

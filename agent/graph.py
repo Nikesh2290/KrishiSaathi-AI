@@ -18,7 +18,7 @@ from langgraph.graph import END, StateGraph
 from agent.connectivity_router import data_source_for_route, resolve_route
 from agent.gemma_client import generate
 from config.settings import Settings, get_settings
-from db.sqlite_client import get_farmer_twin
+from db.persistence import resolve_farmer_twin
 from models.errors import KrishiHTTPException
 from models.farmer import FarmerTwin
 from models.request import AgentRequest
@@ -159,7 +159,7 @@ async def _dispatch_one(
 ) -> Dict[str, Any]:
     settings = ctx.settings
     req = ctx.request
-    twin = await get_farmer_twin(req.farmer_id, settings)
+    twin = await resolve_farmer_twin(req.farmer_id, req.context.connectivity, settings)
     timeout = settings.tool_timeout_seconds
 
     try:

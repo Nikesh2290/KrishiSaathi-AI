@@ -9,7 +9,7 @@ from fastapi import APIRouter, File, Form, UploadFile
 
 from agent.graph import run_graph
 from config.settings import get_settings
-from db.sqlite_client import log_query
+from db.persistence import persist_log_query
 from models.errors import ErrorCode, KrishiHTTPException
 from models.request import AgentRequest
 from models.response import AgentResponse
@@ -39,12 +39,13 @@ async def post_query(body: AgentRequest) -> AgentResponse:
         fallback_hint=state.get("fallback_hint"),
     )
     try:
-        await log_query(
+        await persist_log_query(
             body.farmer_id,
             body.query.text,
             resp.structured.kind,
             resp.text[:2000],
             resp.data_source,
+            body.context.connectivity,
             settings,
         )
     except Exception as e:

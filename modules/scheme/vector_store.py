@@ -76,7 +76,17 @@ def get_collection():
     return _collection
 
 
-def search(query: str, k: int = 5) -> List[Dict[str, Any]]:
+def search(query: str, k: int = 5, *, use_supabase: bool = False) -> List[Dict[str, Any]]:
+    """When use_supabase and env is configured, search Supabase pgvector; else ChromaDB."""
+    if use_supabase:
+        try:
+            from db.supabase_client import search_schemes_vector_remote_sync
+
+            remote = search_schemes_vector_remote_sync(query, k=k)
+            if remote:
+                return remote
+        except Exception as e:
+            logger.warning("Supabase scheme search failed: %s", e)
     col = get_collection()
     if col.count() == 0:
         return []

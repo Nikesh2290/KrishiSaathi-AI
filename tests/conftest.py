@@ -12,6 +12,8 @@ from config.settings import get_settings
 
 @pytest.fixture(autouse=True)
 def test_env(tmp_path_factory):
+    for k in ("SUPABASE_URL", "SUPABASE_ANON_KEY", "SUPABASE_SERVICE_ROLE_KEY"):
+        os.environ.pop(k, None)
     root = tmp_path_factory.mktemp("ks")
     os.environ["DATABASE_PATH"] = str(root / "test.db")
     os.environ["CHROMA_PATH"] = str(root / "chroma")

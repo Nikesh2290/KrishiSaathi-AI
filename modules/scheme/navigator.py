@@ -27,11 +27,19 @@ async def find_schemes(
         retrieved = offline_search.keyword_search(query, limit=5)
         source = "offline_keyword"
     else:
+        retrieved = []
+        source = "chroma"
         try:
-            retrieved = vector_store.search(query, k=5)
-            source = "chroma"
+            if settings.supabase_db_configured:
+                r = vector_store.search(query, k=5, use_supabase=True)
+                if r:
+                    retrieved, source = r, "supabase_pgvector"
+            if not retrieved:
+                retrieved = vector_store.search(query, k=5, use_supabase=False)
+                if retrieved:
+                    source = "chroma"
         except Exception as e:
-            logger.warning("Chroma search failed: %s", e)
+            logger.warning("Vector retrieval failed: %s", e)
             retrieved = offline_search.keyword_search(query, limit=5)
             source = "offline_keyword_fallback"
 

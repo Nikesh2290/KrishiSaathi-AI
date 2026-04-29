@@ -35,7 +35,7 @@ async def test_navigator_mock(monkeypatch):
 
     monkeypatch.setattr(
         "modules.scheme.navigator.vector_store.search",
-        lambda q, k=5: [{"name": "PM-KISAN", "id": "pm_kisan"}],
+        lambda q, k=5, **kwargs: [{"name": "PM-KISAN", "id": "pm_kisan"}],
     )
     async def fake_gen(*a, **k):
         return "PM-KISAN pays Rs 6000/year."

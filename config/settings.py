@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from functools import lru_cache
+from pathlib import Path
 from typing import List
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -38,6 +43,16 @@ class Settings(BaseSettings):
 
     connectivity_mode: str = Field(default="auto", alias="CONNECTIVITY_MODE")
 
+    # Supabase (Auth + Postgres + pgvector). Anon key is used for email/password auth;
+    # service role is required for server-side DB/RPC (bypasses RLS).
+    supabase_url: str = Field(default="", alias="SUPABASE_URL")
+    supabase_anon_key: str = Field(default="", alias="SUPABASE_ANON_KEY")
+    supabase_service_role_key: str = Field(
+        default="",
+        alias="SUPABASE_SERVICE_ROLE_KEY",
+        description="Server-only key for farmer_twin, query_history, scheme_vectors sync/search.",
+    )
+
     database_path: str = Field(default="./data/krishisaathi.db", alias="DATABASE_PATH")
     chroma_path: str = Field(default="./data/chroma", alias="CHROMA_PATH")
 
@@ -68,7 +83,27 @@ class Settings(BaseSettings):
     def cors_origins_list(self) -> List[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
+    @property
+    def supabase_auth_configured(self) -> bool:
+        return bool(self.supabase_url and self.supabase_anon_key)
+
+    @property
+    def supabase_db_configured(self) -> bool:
+        """DB + vector RPC from this API (prefers service role)."""
+        return bool(
+            self.supabase_url
+            and (self.supabase_service_role_key or self.supabase_anon_key)
+        )
+
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    settings = Settings()
+    ssl_cert_file = os.environ.get("SSL_CERT_FILE", "").strip()
+    if ssl_cert_file and not Path(ssl_cert_file).is_file():
+        logger.warning(
+            "Ignoring invalid SSL_CERT_FILE path: %s (falling back to default trust store)",
+            ssl_cert_file,
+        )
+        os.environ.pop("SSL_CERT_FILE", None)
+    return settings

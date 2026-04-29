@@ -1,14 +1,17 @@
-"""Offline sync bundle endpoint."""
+"""Offline sync bundle endpoint + Supabase push."""
 
 from __future__ import annotations
 
+import logging
 import time
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from fastapi import APIRouter, Query, Response
 
 from config.settings import get_settings
 from offline.bundle_builder import build_gzip_bundle
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1", tags=["sync"])
 
@@ -50,3 +53,18 @@ async def get_sync_bundle(
             "Cache-Control": f"public, max-age={settings.sync_bundle_cache_ttl_seconds}",
         },
     )
+
+
+@router.post("/sync/push")
+async def push_to_supabase() -> Dict[str, Any]:
+    """Push unsynced SQLite farmer rows, query logs, and scheme vectors to Supabase."""
+    settings = get_settings()
+    if not settings.supabase_db_configured:
+        return {"ok": False, "skipped": True, "reason": "Supabase DB not configured"}
+    from offline.supabase_sync import SupabaseSync
+
+    try:
+        return await SupabaseSync(settings).run()
+    except Exception:
+        logger.exception("SupabaseSync failed")
+        raise

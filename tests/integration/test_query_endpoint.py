@@ -33,11 +33,11 @@ def test_query_mocked(monkeypatch, client):
             "fallback_hint": None,
         }
 
-    async def fake_log_query(*_args, **_kwargs):
+    async def fake_persist_log_query(*_args, **_kwargs):
         return None
 
     monkeypatch.setattr("api.routes.query.run_graph", fake_run_graph)
-    monkeypatch.setattr("api.routes.query.log_query", fake_log_query)
+    monkeypatch.setattr("api.routes.query.persist_log_query", fake_persist_log_query)
     body = {
         "farmer_id": "f1",
         "query": {"text": "PM-KISAN", "language": "hi"},

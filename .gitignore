@@ -147,6 +147,9 @@ venv.bak/
 gemma_hack_venv/
 .gemma_hack_venv/
 
+# cursor
+.cursor/
+
 # Spyder project settings
 .spyderproject
 .spyproject
