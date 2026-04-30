@@ -27,7 +27,11 @@ class FakeGemmaClient:
             (m for m in messages if (isinstance(m, dict) and m.get("role") == "system")),
             None,
         )
-        if first_system and "planning component" in first_system.get("content", "").lower():
+        sys_content = (first_system.get("content") if first_system else "") or ""
+        sys_lower = sys_content.lower()
+        if first_system and (
+            "planning component" in sys_lower or "intent classifier" in sys_lower
+        ):
             return json.dumps(self.plan_response)
         return self.heavy_synth_text if heavy else self.synth_text
 

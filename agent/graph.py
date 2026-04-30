@@ -36,6 +36,36 @@ from safety.layer import should_escalate
 
 logger = logging.getLogger(__name__)
 
+CLARIFY_TOOL = "__clarify__"
+_ALLOWED_PLANNER_TOOLS = frozenset(
+    {
+        "climate",
+        "vision",
+        "scheme",
+        "crop_planner",
+        "financial",
+        "market",
+        "general_qa",
+    }
+)
+
+
+_SYNTHESIS_SYSTEM_PROMPT = """You are KrishiSaathi, a smart and helpful assistant for Indian farmers.
+
+You are given:
+1. The user's exact query
+2. Results from data tools (weather, market prices, crop recommendations, schemes, financial numbers, disease detection, etc.)
+
+Your job:
+- Answer the user's question directly and completely first.
+- If any tool result is relevant and helpful to the question, weave it naturally into your answer.
+- If a tool result is NOT relevant to what the user asked, ignore it entirely (do not mention unrelated tools).
+- If a general_qa tool result is present with an "answer" field, treat that as the core answer — keep it as-is unless other tools clearly add useful facts for this query.
+- Never lead with unrelated suggestions or alternatives before answering what was asked.
+- Match the farmer's language (Hindi/Hinglish if their query is in Hindi).
+
+If a vision tool returned is_agricultural=false: briefly describe what the image shows using the description field, then politely explain your specialization (crop disease, soil, schemes, weather, farm advice) using specialization_note—do not pretend it is a crop disease."""
+
 # ------------------------------ state ------------------------------
 
 
@@ -57,26 +87,56 @@ class AgentState(TypedDict, total=False):
 
 # --------------------------- planner bits ---------------------------
 
-_PLANNER_PROMPT = """You are the planning component for KrishiSaathi, an AI for Indian farmers.
-Return ONLY a JSON object (no markdown) with this shape:
+_PLANNER_PROMPT = """You are the intent classifier for KrishiSaathi, an AI assistant for Indian farmers.
+Use semantic understanding: users may write English, Hindi, Hinglish, or common typos — infer MEANING.
+
+Return ONLY valid JSON (no markdown). Exactly ONE of these shapes:
 {"tools":[{"tool":"TOOL_NAME","params":{}}]}
-Valid TOOL_NAME values:
-- climate — params: lat (number), lng (number), crop (string)
-- vision — params: use_image (boolean)
-- scheme — params: query (string)
-- crop_planner — params: season (string), optional crop (string)
+{"clarify": true, "question": "<one short clarifying question in the user's language>"}
+
+Allowed TOOL_NAME values and params:
+- general_qa — params: {"query": "<echo user question>"}
+  How-to / agronomy / planting / sowing / harvesting / irrigation / storage / pest advice WITHOUT an attached crop image.
+  Examples: "how to plant potato", "aloo kaise lagayein", "plnat tomato" (typo), "when to irrigate wheat"
+  NOT for choosing which crop is best for the whole season (that is crop_planner).
+
+- crop_planner — params: {"season": "<rabi|kharif|zaid or best guess>", "crop": "<mentioned crop or wheat>"}
+  User wants WHAT to grow / crop recommendation / rotation planning for the season.
+  Examples: "best crop this season", "kya ugaayein is baar", "which crop should I grow"
+  CRITICAL: "plant" / "planting" / how-to-grow a named crop → general_qa, NOT crop_planner.
+
+- climate — params: {"lat": number, "lng": number, "crop": string}
+  Weather, rain, forecast, temperature for farming decisions.
+
+- vision — params: {"use_image": true|false}
+  Disease / pest on leaves / identify problem FROM IMAGE. If query.image_ref is present OR device_intent suggests crop disease, include vision with use_image true when image_ref exists.
+
+- scheme — params: {"query": string}
+  Government schemes, subsidies, PM-KISAN, KCC rules, eligibility.
+
+- market — params: {"crop": string, "district": string}
+  Mandi price, market rate, selling price.
+
 - financial — params: {}
-- market — params: crop (string), district (string)
+  Loans, KCC limits, crop insurance, premium estimates.
 
 Rules:
-- If device_intent is crop_disease or image_ref present OR text mentions disease/pest/yellow/rust, include vision.
-- If device_intent is weather or text mentions rain/weather, include climate.
-- If device_intent is scheme_query or text mentions scheme/subsidy/PM-KISAN/KCC, include scheme.
-- Prefer at most 3 tools.
+- Prefer at most 3 tools in the tools array. Fewer is better when one tool suffices.
+- If query.image_ref is present and user may be asking about the photo → include vision first with use_image true.
+- Use farmer_profile (soil, state, crops) from input only to disambiguate — do not invent facts.
+
+WHEN TO USE clarify instead of tools:
+- Query is too vague or one word with no clear farming intent ("help", "kuch batao", "problem", "potato" alone).
+- Query is gibberish or too short to route confidently.
+- Two very different interpretations are equally likely and profile does not resolve them.
+Return {"clarify": true, "question": "..."} with ONE focused question.
+
+WHEN NOT to clarify: if intent is reasonably clear, pick tools. Do not over-ask.
 """
 
 
 def _heuristic_plan(req: AgentRequest) -> List[Dict[str, Any]]:
+    """Emergency fallback only when the LLM planner call fails (network/parse error)."""
     text = (req.query.text or "").lower()
     intent = (req.context.device_intent or "general").lower()
     lat = float(req.context.location.get("lat") or 20.59)
@@ -86,38 +146,59 @@ def _heuristic_plan(req: AgentRequest) -> List[Dict[str, Any]]:
         if c in text:
             crop = c
             break
-    tools: List[Dict[str, Any]] = []
     has_image = bool(req.query.image_ref)
-    if has_image or "disease" in intent or any(
-        k in text for k in ("disease", "pest", "yellow", "rust", "rog", "रोग")
-    ):
-        tools.append({"tool": "vision", "params": {"use_image": has_image}})
-    if "weather" in intent or any(k in text for k in ("rain", "weather", "मौसम", "बारिश")):
-        tools.append({"tool": "climate", "params": {"lat": lat, "lng": lng, "crop": crop}})
-    if "scheme" in intent or any(
-        k in text for k in ("scheme", "subsidy", "pm-kisan", "kcc", "योजना")
-    ):
-        tools.append({"tool": "scheme", "params": {"query": req.query.text or "schemes"}})
-    if "market" in intent or "price" in text or "मंडी" in req.query.text:
+    if has_image:
+        return [{"tool": "vision", "params": {"use_image": True}}]
+    if "weather" in intent or any(k in text for k in ("rain", "weather", "मौसम", "बारिश", "barish", "baarish", "mausam")):
+        return [{"tool": "climate", "params": {"lat": lat, "lng": lng, "crop": crop}}]
+    if any(k in text for k in ("scheme", "subsidy", "pm-kisan", "kcc", "योजना", "yojana")):
+        return [{"tool": "scheme", "params": {"query": req.query.text or "schemes"}}]
+    if "market" in intent or any(k in text for k in ("price", "mandi", "rate", "bhav", "मंडी")):
         dist = req.context.location.get("district") or "Ludhiana"
-        tools.append({"tool": "market", "params": {"crop": crop, "district": str(dist)}})
-    if "crop" in intent or "plan" in text or "फसल" in req.query.text:
-        tools.append({"tool": "crop_planner", "params": {"season": "rabi", "crop": crop}})
-    if "financial" in intent or "loan" in text or "बीमा" in req.query.text:
-        tools.append({"tool": "financial", "params": {}})
-    if not tools:
-        tools.append(
-            {"tool": "scheme", "params": {"query": req.query.text or "PM-KISAN eligibility"}}
-        )
-    return tools[:3]
+        return [{"tool": "market", "params": {"crop": crop, "district": str(dist)}}]
+    if "financial" in intent or any(k in text for k in ("loan", "बीमा", "insurance", "kcc")):
+        return [{"tool": "financial", "params": {}}]
+    if "disease" in intent or any(k in text for k in ("disease", "pest", "yellow", "rust", "rog", "रोग")):
+        return [{"tool": "vision", "params": {"use_image": has_image}}]
+    return [{"tool": "general_qa", "params": {"query": req.query.text or ""}}]
+
+
+def _normalize_tool_plan(raw_tools: Any, settings: Settings) -> List[Dict[str, Any]]:
+    if not isinstance(raw_tools, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for step in raw_tools:
+        if not isinstance(step, dict):
+            continue
+        name = step.get("tool") or step.get("name")
+        if not isinstance(name, str) or name not in _ALLOWED_PLANNER_TOOLS:
+            continue
+        params = step.get("params")
+        if not isinstance(params, dict):
+            params = {}
+        out.append({"tool": name, "params": params})
+        if len(out) >= settings.max_react_iterations:
+            break
+    return out
 
 
 async def _plan_with_llm(
     req: AgentRequest, prefer_local: bool, settings: Settings
 ) -> List[Dict[str, Any]]:
+    twin = await resolve_farmer_twin(req.farmer_id, req.context.connectivity, settings)
+    twin_payload: Optional[Dict[str, Any]] = None
+    if twin:
+        twin_payload = {
+            "location": twin.location.model_dump(),
+            "land": twin.land.model_dump(),
+            "current_crops": twin.current_crops,
+            "risk_profile": twin.risk_profile,
+            "preferred_language": twin.preferred_language,
+        }
     user = json.dumps(
         {
             "farmer_id": req.farmer_id,
+            "farmer_profile": twin_payload,
             "query": req.query.model_dump(),
             "context": req.context.model_dump(),
         },
@@ -133,9 +214,15 @@ async def _plan_with_llm(
             raw = re.sub(r"^```[a-z]*\n", "", raw)
             raw = re.sub(r"\n```$", "", raw)
         data = json.loads(raw)
-        tools = data.get("tools") or []
-        if isinstance(tools, list) and tools:
-            return tools[: settings.max_react_iterations]
+        if isinstance(data, dict) and data.get("clarify") is True:
+            q = str(data.get("question") or "").strip() or (
+                "कृपया अपना सवाल थोड़ा और स्पष्ट करें — आपको फसल, मौसम, योजना या बाज़ार में से किस बारे में जानकारी चाहिए?"
+            )
+            return [{"tool": CLARIFY_TOOL, "params": {"question": q}}]
+        tools = data.get("tools") if isinstance(data, dict) else None
+        normalized = _normalize_tool_plan(tools, settings)
+        if normalized:
+            return normalized
     except Exception as e:
         logger.warning("Planner LLM failed, using heuristic: %s", e)
     return _heuristic_plan(req)
@@ -165,7 +252,7 @@ def _dispatch_timeout(settings: Settings, name: str, ctx: _DispatchContext) -> f
             if ctx.offline
             else float(settings.climate_timeout_seconds)
         )
-    if name in ("scheme", "crop_planner", "financial"):
+    if name in ("scheme", "crop_planner", "financial", "general_qa"):
         return float(settings.llm_tool_timeout_seconds)
     if name == "market":
         return float(settings.io_tool_timeout_seconds)
@@ -246,6 +333,33 @@ async def _dispatch_one(
                 timeout,
             )
 
+        if name == "general_qa":
+            soil = twin.land.soil_type if twin else "loamy"
+            st = twin.location.state if twin else (
+                str(req.context.location.get("state") or "") or "India"
+            )
+            crops = twin.current_crops if twin else []
+            q = params.get("query") or req.query.text or ""
+            msgs = [
+                {
+                    "role": "system",
+                    "content": (
+                        f"You are an expert agronomist for Indian farmers in {st}. "
+                        f"This farmer has {soil} soil and is currently growing: "
+                        f"{crops or 'not specified'}. "
+                        "Answer completely and accurately in the farmer's language "
+                        "(Hindi/Hinglish if they wrote in Hindi). "
+                        "Give the direct answer first, then practical tips."
+                    ),
+                },
+                {"role": "user", "content": q},
+            ]
+            answer = await _with_timeout(
+                generate(msgs, prefer_local=ctx.prefer_local, settings=settings),
+                timeout,
+            )
+            return {"answer": answer, "source": "llm_knowledge"}
+
     except asyncio.TimeoutError:
         logger.warning("Tool %s timed out", name)
         return {"error": "timeout", "tool": name}
@@ -295,8 +409,32 @@ async def node_route(state: AgentState) -> Dict[str, Any]:
 async def node_plan(state: AgentState) -> Dict[str, Any]:
     settings = get_settings()
     req = state["request"]
-    plan = await _plan_with_llm(req, prefer_local=bool(state.get("prefer_local")), settings=settings)
-    return {"tool_plan": plan}
+    prefer_local = bool(state.get("prefer_local"))
+    plan = await _plan_with_llm(req, prefer_local=prefer_local, settings=settings)
+    model_used = settings.ollama_model if prefer_local else settings.ai_studio_model
+    return {"tool_plan": plan, "model_used": model_used}
+
+
+async def node_clarify(state: AgentState) -> Dict[str, Any]:
+    plan = state.get("tool_plan") or []
+    question = (
+        plan[0]["params"].get("question")
+        if plan and isinstance(plan[0].get("params"), dict)
+        else None
+    ) or "कृपया अपना सवाल थोड़ा और स्पष्ट करें।"
+    settings = get_settings()
+    prefer_local = bool(state.get("prefer_local"))
+    model_used = state.get("model_used") or (
+        settings.ollama_model if prefer_local else settings.ai_studio_model
+    )
+    return {
+        "draft_text": question,
+        "tool_results": {},
+        "tool_trace": ["clarify"],
+        "safety_flags": [],
+        "confidence_score": 1.0,
+        "model_used": model_used,
+    }
 
 
 async def node_tools(state: AgentState) -> Dict[str, Any]:
@@ -322,14 +460,7 @@ async def node_synthesize(state: AgentState) -> Dict[str, Any]:
     messages = [
         {
             "role": "system",
-            "content": (
-                "You are KrishiSaathi. Summarize tool results for the farmer. "
-                "Be practical. Match farmer language (Hindi/Hinglish if query is Hindi).\n"
-                "If a vision tool returned is_agricultural=false: briefly describe what the image "
-                "shows using the description field, then politely explain your specialization "
-                "(crop disease, soil, schemes, weather, farm advice) using specialization_note—"
-                "do not pretend it is a crop disease."
-            ),
+            "content": _SYNTHESIS_SYSTEM_PROMPT,
         },
         {"role": "user", "content": payload},
     ]
@@ -418,17 +549,30 @@ async def node_fallback_hint(state: AgentState) -> Dict[str, Any]:
 # ------------------------------ graph ------------------------------
 
 
+def _route_after_plan(state: AgentState) -> str:
+    plan = state.get("tool_plan") or []
+    if plan and plan[0].get("tool") == CLARIFY_TOOL:
+        return "clarify"
+    return "tools"
+
+
 def build_graph():
     g = StateGraph(AgentState)
     g.add_node("route", node_route)
     g.add_node("plan", node_plan)
+    g.add_node("clarify", node_clarify)
     g.add_node("tools", node_tools)
     g.add_node("synthesize", node_synthesize)
     g.add_node("safety", node_safety)
     g.add_node("respond", node_fallback_hint)
     g.set_entry_point("route")
     g.add_edge("route", "plan")
-    g.add_edge("plan", "tools")
+    g.add_conditional_edges(
+        "plan",
+        _route_after_plan,
+        {"clarify": "clarify", "tools": "tools"},
+    )
+    g.add_edge("clarify", "respond")
     g.add_edge("tools", "synthesize")
     g.add_edge("synthesize", "safety")
     g.add_edge("safety", "respond")
@@ -466,6 +610,43 @@ async def run_graph_stream(req: AgentRequest) -> AsyncIterator[tuple[str, str]]:
     state.update(await node_route(state))
     yield ("status", json.dumps({"stage": "planning"}, ensure_ascii=False))
     state.update(await node_plan(state))
+
+    plan_early = state.get("tool_plan") or []
+    if plan_early and plan_early[0].get("tool") == CLARIFY_TOOL:
+        yield ("status", json.dumps({"stage": "clarify"}, ensure_ascii=False))
+        state.update(await node_clarify(state))
+        clarify_text = state.get("draft_text") or ""
+        yield ("token", json.dumps({"text": clarify_text}, ensure_ascii=False))
+        state.update(await node_fallback_hint(state))
+
+        rq = req
+        resp = build(
+            draft_text=state.get("draft_text") or "",
+            tool_results={},
+            tool_trace=list(state.get("tool_trace") or []),
+            data_source=str(state.get("data_source") or "live"),
+            language=rq.query.language,
+            safety_flags=list(state.get("safety_flags") or []),
+            model_used=str(state.get("model_used") or settings.ai_studio_model),
+            confidence_score=float(state.get("confidence_score") or 1.0),
+            fallback_hint=state.get("fallback_hint"),  # type: ignore[arg-type]
+        )
+        try:
+            await persist_log_query(
+                rq.farmer_id,
+                rq.query.text,
+                resp.structured.kind,
+                resp.text[:2000],
+                resp.data_source,
+                rq.context.connectivity,
+                settings,
+            )
+        except Exception as e:
+            logger.warning("log_query failed: %s", e)
+
+        yield ("done", resp.model_dump_json())
+        return
+
     yield ("status", json.dumps({"stage": "tools"}, ensure_ascii=False))
     state.update(await node_tools(state))
 
@@ -478,14 +659,7 @@ async def run_graph_stream(req: AgentRequest) -> AsyncIterator[tuple[str, str]]:
     messages = [
         {
             "role": "system",
-            "content": (
-                "You are KrishiSaathi. Summarize tool results for the farmer. "
-                "Be practical. Match farmer language (Hindi/Hinglish if query is Hindi).\n"
-                "If a vision tool returned is_agricultural=false: briefly describe what the image "
-                "shows using the description field, then politely explain your specialization "
-                "(crop disease, soil, schemes, weather, farm advice) using specialization_note—"
-                "do not pretend it is a crop disease."
-            ),
+            "content": _SYNTHESIS_SYSTEM_PROMPT,
         },
         {"role": "user", "content": payload},
     ]
