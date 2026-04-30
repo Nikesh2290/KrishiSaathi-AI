@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, File, Form, UploadFile
+from fastapi.responses import StreamingResponse
 
-from agent.graph import run_graph
+from agent.graph import run_graph, run_graph_stream
 from config.settings import get_settings
 from db.persistence import persist_log_query
 from models.errors import ErrorCode, KrishiHTTPException
@@ -51,6 +53,28 @@ async def post_query(body: AgentRequest) -> AgentResponse:
     except Exception as e:
         logger.warning("log_query failed: %s", e)
     return resp
+
+
+@router.post("/query/stream")
+async def post_query_stream(body: AgentRequest) -> StreamingResponse:
+    async def event_stream():
+        try:
+            async for event_type, data in run_graph_stream(body):
+                yield f"event: {event_type}\ndata: {data}\n\n"
+        except Exception as e:
+            logger.exception("query/stream failed: %s", e)
+            err_payload = json.dumps({"code": "STREAM_ERROR", "message": str(e)})
+            yield f"event: error\ndata: {err_payload}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/query/image", status_code=201)

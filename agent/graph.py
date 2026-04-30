@@ -11,14 +11,15 @@ import logging
 import operator
 import re
 from dataclasses import dataclass
+from collections.abc import AsyncIterator
 from typing import Annotated, Any, Dict, List, Optional, TypedDict
 
 from langgraph.graph import END, StateGraph
 
 from agent.connectivity_router import data_source_for_route, resolve_route
-from agent.gemma_client import generate
+from agent.gemma_client import generate, generate_stream
 from config.settings import Settings, get_settings
-from db.persistence import resolve_farmer_twin
+from db.persistence import persist_log_query, resolve_farmer_twin
 from models.errors import KrishiHTTPException
 from models.farmer import FarmerTwin
 from models.request import AgentRequest
@@ -29,6 +30,7 @@ from modules.financial import advisor as financial_advisor
 from modules.market import engine as market_engine
 from modules.scheme import navigator as scheme_navigator
 from modules.vision import engine as vision_engine
+from response.generator import build
 from safety.layer import check as safety_check
 from safety.layer import should_escalate
 
@@ -447,3 +449,93 @@ def get_graph():
 async def run_graph(req: AgentRequest) -> AgentState:
     graph = get_graph()
     return await graph.ainvoke({"request": req})  # type: ignore[return-value]
+
+
+async def run_graph_stream(req: AgentRequest) -> AsyncIterator[tuple[str, str]]:
+    """Yield SSE-friendly (event_name, payload_json_line) tuples.
+
+    Pipeline runs route/plan/tools, then streams synthesis tokens, then applies
+    the same safety + fallback_hint logic as ``run_graph``. The ``done``
+    payload is ``AgentResponse`` JSON; clients should treat ``text`` as
+    authoritative (may differ from streamed tokens after safety escalation).
+    """
+    settings = get_settings()
+    yield ("status", json.dumps({"stage": "routing"}, ensure_ascii=False))
+
+    state: AgentState = {"request": req}  # type: ignore[assignment]
+    state.update(await node_route(state))
+    yield ("status", json.dumps({"stage": "planning"}, ensure_ascii=False))
+    state.update(await node_plan(state))
+    yield ("status", json.dumps({"stage": "tools"}, ensure_ascii=False))
+    state.update(await node_tools(state))
+
+    yield ("status", json.dumps({"stage": "synthesizing"}, ensure_ascii=False))
+    rq = req
+    payload = json.dumps(
+        {"tools": state.get("tool_results"), "user_query": rq.query.text},
+        ensure_ascii=False,
+    )[:12000]
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are KrishiSaathi. Summarize tool results for the farmer. "
+                "Be practical. Match farmer language (Hindi/Hinglish if query is Hindi).\n"
+                "If a vision tool returned is_agricultural=false: briefly describe what the image "
+                "shows using the description field, then politely explain your specialization "
+                "(crop disease, soil, schemes, weather, farm advice) using specialization_note—"
+                "do not pretend it is a crop disease."
+            ),
+        },
+        {"role": "user", "content": payload},
+    ]
+    prefer_local = bool(state.get("prefer_local"))
+    model_used = settings.ollama_model if prefer_local else settings.ai_studio_model
+
+    draft_acc = ""
+    try:
+        async for chunk in generate_stream(
+            messages, prefer_local=prefer_local, settings=settings
+        ):
+            draft_acc += chunk
+            yield ("token", json.dumps({"text": chunk}, ensure_ascii=False))
+    except Exception as e:
+        logger.exception("Streaming synthesize failed: %s", e)
+        fb = (
+            "यहाँ उपलब्ध जानकारी के आधार पर सुझाव दिए गए हैं। "
+            "कृपया स्थानीय कृषि अधिकारी से पुष्टि करें।"
+        )
+        draft_acc = fb
+        yield ("token", json.dumps({"text": fb}, ensure_ascii=False))
+
+    state["draft_text"] = draft_acc
+    state["model_used"] = model_used
+
+    state.update(await node_safety(state))
+    state.update(await node_fallback_hint(state))
+
+    resp = build(
+        draft_text=state.get("draft_text") or "",
+        tool_results=state.get("tool_results") or {},
+        tool_trace=list(state.get("tool_trace") or []),
+        data_source=str(state.get("data_source") or "live"),
+        language=rq.query.language,
+        safety_flags=list(state.get("safety_flags") or []),
+        model_used=str(state.get("model_used") or settings.ai_studio_model),
+        confidence_score=float(state.get("confidence_score") or 0.5),
+        fallback_hint=state.get("fallback_hint"),  # type: ignore[arg-type]
+    )
+    try:
+        await persist_log_query(
+            rq.farmer_id,
+            rq.query.text,
+            resp.structured.kind,
+            resp.text[:2000],
+            resp.data_source,
+            rq.context.connectivity,
+            settings,
+        )
+    except Exception as e:
+        logger.warning("log_query failed: %s", e)
+
+    yield ("done", resp.model_dump_json())

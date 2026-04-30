@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import base64
+import json
 import logging
+from collections.abc import AsyncIterator
 from typing import List, Optional, Sequence, Union
 
 import httpx
@@ -34,11 +36,13 @@ def _to_lc_messages(messages: Sequence[Union[dict, BaseMessage]]) -> List[BaseMe
     return out
 
 
-async def _ollama_chat(
+def _ollama_messages_payload(
     settings: Settings,
     messages: Sequence[Union[dict, BaseMessage]],
     images: Optional[List[str]] = None,
-) -> str:
+    stream: bool = False,
+) -> tuple[str, dict]:
+    """Build POST body for Ollama /api/chat."""
     url = f"{settings.ollama_base_url.rstrip('/')}/api/chat"
     o_msgs: List[dict] = []
     for m in messages:
@@ -48,15 +52,50 @@ async def _ollama_chat(
         else:
             o_msgs.append({"role": m["role"], "content": m["content"]})
     if images:
-        # Ollama supports images in message for vision models
         last = o_msgs[-1]
         last["images"] = images
-    payload = {"model": settings.ollama_model, "messages": o_msgs, "stream": False}
+    payload = {"model": settings.ollama_model, "messages": o_msgs, "stream": stream}
+    return url, payload
+
+
+async def _ollama_chat(
+    settings: Settings,
+    messages: Sequence[Union[dict, BaseMessage]],
+    images: Optional[List[str]] = None,
+) -> str:
+    url, payload = _ollama_messages_payload(settings, messages, images)
     async with httpx.AsyncClient(timeout=120.0) as client:
         r = await client.post(url, json=payload)
         r.raise_for_status()
         data = r.json()
         return data.get("message", {}).get("content", "") or ""
+
+
+async def _ollama_chat_stream(
+    settings: Settings,
+    messages: Sequence[Union[dict, BaseMessage]],
+    images: Optional[List[str]] = None,
+) -> AsyncIterator[str]:
+    """Stream incremental assistant text chunks from Ollama /api/chat (NDJSON)."""
+    url, payload = _ollama_messages_payload(settings, messages, images, stream=True)
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        async with client.stream("POST", url, json=payload) as r:
+            r.raise_for_status()
+            async for line in r.aiter_lines():
+                line = (line or "").strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    logger.debug("Ollama stream skip non-json line: %s", line[:80])
+                    continue
+                msg = data.get("message") or {}
+                chunk = msg.get("content") or ""
+                if chunk:
+                    yield chunk
+                if data.get("done"):
+                    break
 
 
 def _studio_llm(settings: Settings, heavy: bool = False) -> ChatGoogleGenerativeAI:
@@ -86,6 +125,46 @@ async def generate(
     lc = _to_lc_messages(messages)
     resp = await llm.ainvoke(lc)
     return str(resp.content)
+
+
+async def generate_stream(
+    messages: Sequence[Union[dict, BaseMessage]],
+    prefer_local: bool = False,
+    settings: Optional[Settings] = None,
+    heavy: bool = False,
+) -> AsyncIterator[str]:
+    """Yield text chunks from Ollama (stream) or Gemini (LangChain astream).
+
+    Mirrors ``generate()`` routing: try local stream first when ``prefer_local``,
+    then fall back to AI Studio streaming.
+    """
+    settings = settings or get_settings()
+    if prefer_local:
+        try:
+            async for chunk in _ollama_chat_stream(settings, messages):
+                yield chunk
+            return
+        except Exception as e:
+            logger.warning("Ollama generate_stream failed, falling back to AI Studio: %s", e)
+    llm = _studio_llm(settings, heavy=heavy)
+    lc = _to_lc_messages(messages)
+    async for chunk in llm.astream(lc):
+        raw = getattr(chunk, "content", None)
+        if raw is None:
+            continue
+        if isinstance(raw, str):
+            if raw:
+                yield raw
+        elif isinstance(raw, list):
+            # multimodal fragments; synthesize-only path is text-only
+            for item in raw:
+                if isinstance(item, str):
+                    if item:
+                        yield item
+                elif isinstance(item, dict) and item.get("type") == "text":
+                    t = item.get("text") or ""
+                    if t:
+                        yield t
 
 
 async def generate_with_vision(
