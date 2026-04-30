@@ -62,7 +62,31 @@ class Settings(BaseSettings):
     )
 
     max_react_iterations: int = Field(default=6, alias="MAX_REACT_ITERATIONS")
-    tool_timeout_seconds: float = Field(default=8.0, alias="TOOL_TIMEOUT_SECONDS")
+    tool_timeout_seconds: float = Field(
+        default=15.0,
+        alias="TOOL_TIMEOUT_SECONDS",
+        description="Fallback cap for unknown tools only (known tools use per-tool timeouts below).",
+    )
+    vision_timeout_seconds: float = Field(
+        default=60.0,
+        alias="VISION_TIMEOUT_SECONDS",
+        description="Cap for multimodal disease detection (AI Studio / Ollama vision).",
+    )
+    llm_tool_timeout_seconds: float = Field(
+        default=30.0,
+        alias="LLM_TOOL_TIMEOUT_SECONDS",
+        description="Cap for tools that end with a text LLM call (scheme, crop_planner, financial).",
+    )
+    climate_timeout_seconds: float = Field(
+        default=12.0,
+        alias="CLIMATE_TIMEOUT_SECONDS",
+        description="Cap for live weather HTTP fetch (Open-Meteo).",
+    )
+    io_tool_timeout_seconds: float = Field(
+        default=5.0,
+        alias="IO_TOOL_TIMEOUT_SECONDS",
+        description="Cap for fast local I/O (offline climate JSON, mandi CSV in thread).",
+    )
 
     # Logging
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")

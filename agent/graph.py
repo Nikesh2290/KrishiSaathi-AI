@@ -154,13 +154,29 @@ async def _with_timeout(coro, seconds: float):
     return await asyncio.wait_for(coro, timeout=seconds)
 
 
+def _dispatch_timeout(settings: Settings, name: str, ctx: _DispatchContext) -> float:
+    if name == "vision":
+        return float(settings.vision_timeout_seconds)
+    if name == "climate":
+        return (
+            float(settings.io_tool_timeout_seconds)
+            if ctx.offline
+            else float(settings.climate_timeout_seconds)
+        )
+    if name in ("scheme", "crop_planner", "financial"):
+        return float(settings.llm_tool_timeout_seconds)
+    if name == "market":
+        return float(settings.io_tool_timeout_seconds)
+    return float(settings.tool_timeout_seconds)
+
+
 async def _dispatch_one(
     name: str, params: Dict[str, Any], ctx: _DispatchContext
 ) -> Dict[str, Any]:
     settings = ctx.settings
     req = ctx.request
     twin = await resolve_farmer_twin(req.farmer_id, req.context.connectivity, settings)
-    timeout = settings.tool_timeout_seconds
+    timeout = _dispatch_timeout(settings, name, ctx)
 
     try:
         if name == "climate":
@@ -180,7 +196,12 @@ async def _dispatch_one(
         if name == "vision":
             image_ref = req.query.image_ref
             return await _with_timeout(
-                vision_engine.detect_disease_by_ref(image_ref, ctx.prefer_local, settings),
+                vision_engine.detect_disease_by_ref(
+                    image_ref,
+                    ctx.prefer_local,
+                    settings,
+                    user_query=req.query.text or "",
+                ),
                 timeout,
             )
 
@@ -218,7 +239,10 @@ async def _dispatch_one(
                 twin.location.district if twin else
                 (req.context.location.get("district") or "Ludhiana")
             )
-            return await asyncio.to_thread(market_engine.get_prices, crop, str(dist))
+            return await _with_timeout(
+                asyncio.to_thread(market_engine.get_prices, crop, str(dist)),
+                timeout,
+            )
 
     except asyncio.TimeoutError:
         logger.warning("Tool %s timed out", name)
@@ -298,7 +322,11 @@ async def node_synthesize(state: AgentState) -> Dict[str, Any]:
             "role": "system",
             "content": (
                 "You are KrishiSaathi. Summarize tool results for the farmer. "
-                "Be practical. Match farmer language (Hindi/Hinglish if query is Hindi)."
+                "Be practical. Match farmer language (Hindi/Hinglish if query is Hindi).\n"
+                "If a vision tool returned is_agricultural=false: briefly describe what the image "
+                "shows using the description field, then politely explain your specialization "
+                "(crop disease, soil, schemes, weather, farm advice) using specialization_note—"
+                "do not pretend it is a crop disease."
             ),
         },
         {"role": "user", "content": payload},

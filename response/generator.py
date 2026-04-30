@@ -50,9 +50,18 @@ def build(
     structured_data: Dict[str, Any] = {"intent": intent, "tool_results": tool_results}
     if intent == "disease":
         for v in tool_results.values():
-            if isinstance(v, dict) and v.get("disease"):
+            if not isinstance(v, dict):
+                continue
+            if "is_agricultural" in v:
+                if v.get("is_agricultural") is False:
+                    intent = "image_general"
                 structured_data.update(v)
                 break
+            if v.get("disease"):
+                structured_data.update(v)
+                break
+
+    structured_data["intent"] = intent
 
     return AgentResponse(
         text=draft_text,

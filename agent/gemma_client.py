@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import base64
 import logging
-from typing import Any, List, Optional, Sequence, Union
+from typing import List, Optional, Sequence, Union
 
 import httpx
+from google import genai as _genai
+from google.genai import types as _gtypes
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 
@@ -93,8 +95,15 @@ async def generate_with_vision(
     prefer_local: bool = True,
     settings: Optional[Settings] = None,
 ) -> str:
-    """Multimodal: image + text. Uses AI Studio when Ollama vision unavailable."""
+    """Multimodal: image + text.
+
+    Ollama path (prefer_local=True): sends base64 in Ollama /api/chat format.
+    AI Studio path: uses google-genai SDK directly with Part.from_bytes — this is
+    the only reliable way to pass an image; LangChain's image_url/data-URI wrappers
+    are inconsistent across langchain-google-genai versions and should NOT be used.
+    """
     settings = settings or get_settings()
+
     if prefer_local:
         try:
             return await _ollama_chat(
@@ -107,20 +116,45 @@ async def generate_with_vision(
             )
         except Exception as e:
             logger.warning("Ollama vision failed, trying AI Studio: %s", e)
-    llm = _studio_llm(settings)
-    # LangChain Gemini multimodal
+
+    # Decode and validate before making the API call.
     try:
-        base64.b64decode(image_b64, validate=True)
+        raw_bytes = base64.b64decode(image_b64, validate=True)
     except Exception as e:
         raise ValueError("Invalid base64 image") from e
-    msg = HumanMessage(
-        content=[
-            {"type": "text", "text": f"{system_prompt}\n\n{user_text}"},
-            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + image_b64}},
-        ]
+
+    if not settings.google_api_key:
+        raise RuntimeError("GOOGLE_AI_STUDIO_KEY not set")
+
+    logger.info(
+        "vision → AI Studio model=%s image_bytes=%d",
+        settings.ai_studio_model,
+        len(raw_bytes),
     )
-    resp = await llm.ainvoke([msg])
-    return str(resp.content)
+
+    client = _genai.Client(api_key=settings.google_api_key)
+    response = await client.aio.models.generate_content(
+        model=settings.ai_studio_model,
+        contents=[
+            _gtypes.Part.from_bytes(data=raw_bytes, mime_type="image/jpeg"),
+            _gtypes.Part(text=user_text),
+        ],
+        config=_gtypes.GenerateContentConfig(
+            system_instruction=system_prompt,
+            temperature=0.2,
+        ),
+    )
+    # Collect only non-thinking text parts. Thinking models return parts with
+    # thought=True which must be excluded before JSON parsing.
+    text = ""
+    for candidate in response.candidates or []:
+        for part in (candidate.content.parts if candidate.content else []):
+            if getattr(part, "thought", False):
+                continue
+            if part.text:
+                text += part.text
+    logger.debug("vision response (first 300): %s", text[:300])
+    return text
 
 
 async def ollama_healthy(settings: Optional[Settings] = None) -> bool:

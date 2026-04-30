@@ -224,7 +224,7 @@ Offline answers include a clear disclaimer, e.g.
 | Parameter | Value |
 | :--- | :--- |
 | Max iterations | 6 (configurable, avoids runaway loops) |
-| Timeout per tool | 8 seconds |
+| Timeout per tool | Per-kind caps via env (vision 60s, LLM tools 30s, climate 12s, local I/O 5s; see `config/settings.py`) |
 | Trace | Each call logged as `ToolTrace` for explainability |
 
 ### 3.6 Intelligence modules (6 tools)
@@ -532,7 +532,7 @@ krishisaathi-ai/
 | Topic | Approach |
 | :--- | :--- |
 | API | Stateless `POST /api/v1/query`; SQLite-backed rate limit per `farmer_id` (~10 req/min) |
-| Long tools | In-process timeouts (`TOOL_TIMEOUT_SECONDS`); extend with job queue later |
+| Long tools | In-process per-tool timeouts (`VISION_TIMEOUT_SECONDS`, `LLM_TOOL_TIMEOUT_SECONDS`, `CLIMATE_TIMEOUT_SECONDS`, `IO_TOOL_TIMEOUT_SECONDS`; `TOOL_TIMEOUT_SECONDS` = fallback for unknown tools); extend with job queue later |
 | Data | SQLite file + Chroma directory — mount a volume in Docker (`docker-compose.yml`) |
 | Models | `config/settings.py` + env (`AI_STUDIO_MODEL`, `AI_STUDIO_ESCALATION_MODEL`) |
 | Prod (future) | Add PostgreSQL/Redis only if traffic demands; hackathon build stays minimal |

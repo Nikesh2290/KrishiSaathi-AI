@@ -29,6 +29,9 @@ async def test_detect_disease_mock(monkeypatch):
     async def fake_gen(*a, **k):
         return json.dumps(
             {
+                "is_agricultural": True,
+                "image_type": "crop_disease",
+                "subject": "wheat",
                 "disease": "Yellow Rust",
                 "confidence": 0.9,
                 "symptoms": ["yellow pustules"],
