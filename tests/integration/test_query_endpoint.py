@@ -56,14 +56,18 @@ def test_query_mocked(monkeypatch, client):
 
 
 def test_query_stream_mocked(monkeypatch, client):
-    """SSE /query/stream yields status → token → done with AgentResponse-shaped JSON."""
+    """POST /query/stream uses AI SDK Data Stream (data: lines + [DONE])."""
 
     async def fake_stream(_req):
-        yield ("status", json.dumps({"stage": "routing"}))
-        yield ("token", json.dumps({"text": "hello"}))
-        done_payload = {
+        yield ("start", {"messageId": "00000000-0000-0000-0000-000000000099"})
+        yield ("data-stage", {"data": {"stage": "routing"}})
+        yield ("start-step", {})
+        yield ("text-start", {"id": "txt_test"})
+        yield ("text-delta", {"id": "txt_test", "delta": "hello"})
+        yield ("text-end", {"id": "txt_test"})
+        yield ("finish-step", {})
+        meta = {
             "response_id": "00000000-0000-0000-0000-000000000001",
-            "text": "hello",
             "structured": {"kind": "scheme", "data": {}},
             "data_source": "live",
             "confidence_level": "medium",
@@ -75,7 +79,9 @@ def test_query_stream_mocked(monkeypatch, client):
             "language": "hi",
             "timestamp": "2026-01-01T00:00:00Z",
         }
-        yield ("done", json.dumps(done_payload))
+        yield ("data-metadata", {"data": meta})
+        yield ("finish", {})
+        yield ("__done__", None)
 
     monkeypatch.setattr("api.routes.query.run_graph_stream", fake_stream)
     body = {
@@ -91,34 +97,43 @@ def test_query_stream_mocked(monkeypatch, client):
     ) as r:
         assert r.status_code == 200
         assert "text/event-stream" in r.headers.get("content-type", "").lower()
+        assert r.headers.get("x-vercel-ai-ui-message-stream") == "v1"
 
-        chunks: list[dict] = []
+        payloads: list[object] = []
         buffer = ""
 
-        # TestClient exposes .iter_lines() on streaming responses (starlette httpx wrapper).
         for line in r.iter_lines():
             if line is None:
                 continue
             buffer += line + "\n"
-            # One SSE event ends with blank line (\n\n in buffer).
             while "\n\n" in buffer:
                 block, buffer = buffer.split("\n\n", 1)
-                event_name = None
                 data_lines: list[str] = []
                 for part in block.strip().split("\n"):
-                    if part.startswith("event:"):
-                        event_name = part.removeprefix("event:").strip()
-                    elif part.startswith("data:"):
+                    if part.startswith("data:"):
                         data_lines.append(part.removeprefix("data:").strip())
-                assert event_name is not None
-                data_str = "".join(data_lines)
-                chunks.append({"event": event_name, "data": data_str})
+                data_str = "".join(data_lines).strip()
+                if data_str == "[DONE]":
+                    payloads.append("[DONE]")
+                else:
+                    payloads.append(json.loads(data_str))
 
-    assert chunks[0]["event"] == "status"
-    assert json.loads(chunks[0]["data"]) == {"stage": "routing"}
-    assert chunks[1]["event"] == "token"
-    assert json.loads(chunks[1]["data"]) == {"text": "hello"}
-    assert chunks[-1]["event"] == "done"
-    finished = json.loads(chunks[-1]["data"])
-    assert finished["text"] == "hello"
-    assert finished["structured"]["kind"] == "scheme"
+    assert payloads[0] == {
+        "type": "start",
+        "messageId": "00000000-0000-0000-0000-000000000099",
+    }
+    assert payloads[1] == {
+        "type": "data-stage",
+        "data": {"stage": "routing"},
+    }
+    assert payloads[2] == {"type": "start-step"}
+    assert payloads[3] == {"type": "text-start", "id": "txt_test"}
+    assert payloads[4] == {"type": "text-delta", "id": "txt_test", "delta": "hello"}
+    assert payloads[5] == {"type": "text-end", "id": "txt_test"}
+    assert payloads[6] == {"type": "finish-step"}
+    assert payloads[7]["type"] == "data-metadata"
+    assert payloads[7]["data"]["confidence_score"] == 0.75
+    assert payloads[7]["data"]["structured"]["kind"] == "scheme"
+    assert "text" not in payloads[7]["data"]
+    assert payloads[8] == {"type": "finish"}
+    assert payloads[-1] == "[DONE]"

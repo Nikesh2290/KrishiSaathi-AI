@@ -60,11 +60,18 @@ async def post_query_stream(body: AgentRequest) -> StreamingResponse:
     async def event_stream():
         try:
             async for event_type, data in run_graph_stream(body):
-                yield f"event: {event_type}\ndata: {data}\n\n"
+                if event_type == "__done__":
+                    yield "data: [DONE]\n\n"
+                else:
+                    payload: dict[str, object] = {"type": event_type}
+                    if data is not None:
+                        payload.update(data)
+                    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
         except Exception as e:
             logger.exception("query/stream failed: %s", e)
-            err_payload = json.dumps({"code": "STREAM_ERROR", "message": str(e)})
-            yield f"event: error\ndata: {err_payload}\n\n"
+            err_payload = json.dumps({"type": "error", "errorText": str(e)})
+            yield f"data: {err_payload}\n\n"
+            yield "data: [DONE]\n\n"
 
     return StreamingResponse(
         event_stream(),
@@ -73,6 +80,7 @@ async def post_query_stream(body: AgentRequest) -> StreamingResponse:
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
+            "x-vercel-ai-ui-message-stream": "v1",
         },
     )
 

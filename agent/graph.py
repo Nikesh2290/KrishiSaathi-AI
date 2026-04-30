@@ -11,8 +11,11 @@ import logging
 import operator
 import re
 from dataclasses import dataclass
+from uuid import uuid4
 from collections.abc import AsyncIterator
 from typing import Annotated, Any, Dict, List, Optional, TypedDict
+
+from models.response import AgentResponse
 
 from langgraph.graph import END, StateGraph
 
@@ -595,28 +598,46 @@ async def run_graph(req: AgentRequest) -> AgentState:
     return await graph.ainvoke({"request": req})  # type: ignore[return-value]
 
 
-async def run_graph_stream(req: AgentRequest) -> AsyncIterator[tuple[str, str]]:
-    """Yield SSE-friendly (event_name, payload_json_line) tuples.
+def _agent_response_metadata(resp: AgentResponse) -> dict:
+    """Payload for AI SDK ``data-metadata`` part (AgentResponse without streamed text)."""
+    d = resp.model_dump(mode="json")
+    d.pop("text", None)
+    return {"data": d}
 
-    Pipeline runs route/plan/tools, then streams synthesis tokens, then applies
-    the same safety + fallback_hint logic as ``run_graph``. The ``done``
-    payload is ``AgentResponse`` JSON; clients should treat ``text`` as
-    authoritative (may differ from streamed tokens after safety escalation).
+
+async def run_graph_stream(
+    req: AgentRequest,
+) -> AsyncIterator[tuple[str, Optional[dict[str, Any]]]]:
+    """Yield AI SDK UI Data Stream parts as (part_type, extra_fields_or_None).
+
+    The HTTP layer emits ``data: {"type":<part_type>, ...}`` and ends with ``data: [DONE]``.
+    Typed text deltas use ``text-start`` / ``text-delta`` / ``text-end`` with shared ``id``.
     """
     settings = get_settings()
-    yield ("status", json.dumps({"stage": "routing"}, ensure_ascii=False))
+    message_id = str(uuid4())
+    text_id = f"txt_{uuid4().hex}"
+
+    yield ("start", {"messageId": message_id})
+    yield ("data-stage", {"data": {"stage": "routing"}})
 
     state: AgentState = {"request": req}  # type: ignore[assignment]
     state.update(await node_route(state))
-    yield ("status", json.dumps({"stage": "planning"}, ensure_ascii=False))
+    yield ("data-stage", {"data": {"stage": "planning"}})
     state.update(await node_plan(state))
 
     plan_early = state.get("tool_plan") or []
     if plan_early and plan_early[0].get("tool") == CLARIFY_TOOL:
-        yield ("status", json.dumps({"stage": "clarify"}, ensure_ascii=False))
+        yield ("data-stage", {"data": {"stage": "clarify"}})
         state.update(await node_clarify(state))
         clarify_text = state.get("draft_text") or ""
-        yield ("token", json.dumps({"text": clarify_text}, ensure_ascii=False))
+
+        yield ("start-step", {})
+        yield ("text-start", {"id": text_id})
+        if clarify_text:
+            yield ("text-delta", {"id": text_id, "delta": clarify_text})
+        yield ("text-end", {"id": text_id})
+        yield ("finish-step", {})
+
         state.update(await node_fallback_hint(state))
 
         rq = req
@@ -644,13 +665,15 @@ async def run_graph_stream(req: AgentRequest) -> AsyncIterator[tuple[str, str]]:
         except Exception as e:
             logger.warning("log_query failed: %s", e)
 
-        yield ("done", resp.model_dump_json())
+        yield ("data-metadata", _agent_response_metadata(resp))
+        yield ("finish", {})
+        yield ("__done__", None)
         return
 
-    yield ("status", json.dumps({"stage": "tools"}, ensure_ascii=False))
+    yield ("data-stage", {"data": {"stage": "tools"}})
     state.update(await node_tools(state))
 
-    yield ("status", json.dumps({"stage": "synthesizing"}, ensure_ascii=False))
+    yield ("data-stage", {"data": {"stage": "synthesizing"}})
     rq = req
     payload = json.dumps(
         {"tools": state.get("tool_results"), "user_query": rq.query.text},
@@ -666,13 +689,16 @@ async def run_graph_stream(req: AgentRequest) -> AsyncIterator[tuple[str, str]]:
     prefer_local = bool(state.get("prefer_local"))
     model_used = settings.ollama_model if prefer_local else settings.ai_studio_model
 
+    yield ("start-step", {})
+    yield ("text-start", {"id": text_id})
+
     draft_acc = ""
     try:
         async for chunk in generate_stream(
             messages, prefer_local=prefer_local, settings=settings
         ):
             draft_acc += chunk
-            yield ("token", json.dumps({"text": chunk}, ensure_ascii=False))
+            yield ("text-delta", {"id": text_id, "delta": chunk})
     except Exception as e:
         logger.exception("Streaming synthesize failed: %s", e)
         fb = (
@@ -680,7 +706,10 @@ async def run_graph_stream(req: AgentRequest) -> AsyncIterator[tuple[str, str]]:
             "कृपया स्थानीय कृषि अधिकारी से पुष्टि करें।"
         )
         draft_acc = fb
-        yield ("token", json.dumps({"text": fb}, ensure_ascii=False))
+        yield ("text-delta", {"id": text_id, "delta": fb})
+
+    yield ("text-end", {"id": text_id})
+    yield ("finish-step", {})
 
     state["draft_text"] = draft_acc
     state["model_used"] = model_used
@@ -712,4 +741,6 @@ async def run_graph_stream(req: AgentRequest) -> AsyncIterator[tuple[str, str]]:
     except Exception as e:
         logger.warning("log_query failed: %s", e)
 
-    yield ("done", resp.model_dump_json())
+    yield ("data-metadata", _agent_response_metadata(resp))
+    yield ("finish", {})
+    yield ("__done__", None)
