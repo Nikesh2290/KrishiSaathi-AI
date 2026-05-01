@@ -118,6 +118,7 @@ async def post_query(body: AgentRequest) -> AgentResponse:
                 model_used="rules",
                 tool_trace=["smalltalk"],
                 language=body.query.language,
+                conversation_id=body.conversation_id,
             )
     state = await run_graph(body)
     resp = build(
@@ -131,6 +132,7 @@ async def post_query(body: AgentRequest) -> AgentResponse:
         confidence_score=float(state.get("confidence_score") or 0.5),
         fallback_hint=state.get("fallback_hint"),
     )
+    resp.conversation_id = body.conversation_id
     try:
         await persist_log_query(
             body.farmer_id,
@@ -139,7 +141,8 @@ async def post_query(body: AgentRequest) -> AgentResponse:
             resp.text[:2000],
             resp.data_source,
             body.context.connectivity,
-            settings,
+            conversation_id=body.conversation_id,
+            settings=settings,
         )
     except Exception as e:
         logger.warning("log_query failed: %s", e)
@@ -156,6 +159,8 @@ async def post_query_stream(body: AgentRequest) -> StreamingResponse:
                     _kind, reply = st
                     payload: dict[str, object] = {"type": "text-delta", "delta": reply}
                     yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    meta = {"type": "data-metadata", "data": {"conversation_id": body.conversation_id}}
+                    yield f"data: {json.dumps(meta, ensure_ascii=False)}\n\n"
                     yield "data: [DONE]\n\n"
                     return
             async for event_type, data in run_graph_stream(body):

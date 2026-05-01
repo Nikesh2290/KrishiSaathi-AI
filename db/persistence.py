@@ -64,12 +64,23 @@ async def persist_log_query(
     response: str,
     data_source: str,
     connectivity: str,
+    *,
+    conversation_id: Optional[str] = None,
     settings: Optional[Settings] = None,
 ) -> None:
     settings = settings or get_settings()
     offline = is_offline_context(connectivity)
     if offline:
-        await log_query(farmer_id, query_text, intent, response, data_source, settings, synced=0)
+        await log_query(
+            farmer_id,
+            query_text,
+            intent,
+            response,
+            data_source,
+            settings,
+            synced=0,
+            conversation_id=conversation_id,
+        )
         return
     if settings.supabase_db_configured:
         try:
@@ -80,11 +91,39 @@ async def persist_log_query(
                 response,
                 data_source,
                 sqlite_timestamp_unix=None,
+                conversation_id=conversation_id,
                 settings=settings,
             )
-            await log_query(farmer_id, query_text, intent, response, data_source, settings, synced=1)
+            await log_query(
+                farmer_id,
+                query_text,
+                intent,
+                response,
+                data_source,
+                settings,
+                synced=1,
+                conversation_id=conversation_id,
+            )
         except Exception as e:
             logger.warning("Remote query log failed, queuing for sync: %s", e)
-            await log_query(farmer_id, query_text, intent, response, data_source, settings, synced=0)
+            await log_query(
+                farmer_id,
+                query_text,
+                intent,
+                response,
+                data_source,
+                settings,
+                synced=0,
+                conversation_id=conversation_id,
+            )
     else:
-        await log_query(farmer_id, query_text, intent, response, data_source, settings, synced=1)
+        await log_query(
+            farmer_id,
+            query_text,
+            intent,
+            response,
+            data_source,
+            settings,
+            synced=1,
+            conversation_id=conversation_id,
+        )

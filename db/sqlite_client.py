@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS query_history (
     response TEXT,
     timestamp INTEGER NOT NULL,
     data_source TEXT,
+    conversation_id TEXT,
     synced INTEGER NOT NULL DEFAULT 0
 );
 
@@ -79,6 +80,8 @@ async def _migrate_existing_db(db: aiosqlite.Connection) -> None:
     qh = await _cols("query_history")
     if qh and "synced" not in qh:
         await db.execute("ALTER TABLE query_history ADD COLUMN synced INTEGER NOT NULL DEFAULT 0")
+    if qh and "conversation_id" not in qh:
+        await db.execute("ALTER TABLE query_history ADD COLUMN conversation_id TEXT")
 
 
 async def init_db(settings: Optional[Settings] = None) -> None:
@@ -148,17 +151,40 @@ async def log_query(
     settings: Optional[Settings] = None,
     *,
     synced: int = 0,
+    conversation_id: Optional[str] = None,
 ) -> None:
     now = int(time.time())
     async with get_connection(settings) as db:
         await db.execute(
             """
-            INSERT INTO query_history (farmer_id, query_text, intent, response, timestamp, data_source, synced)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO query_history (
+                farmer_id, query_text, intent, response, timestamp, data_source, conversation_id, synced
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (farmer_id, query_text, intent, response, now, data_source, synced),
+            (farmer_id, query_text, intent, response, now, data_source, conversation_id, synced),
         )
         await db.commit()
+
+
+async def get_last_n_turns(
+    farmer_id: str,
+    conversation_id: str,
+    n: int = 3,
+    settings: Optional[Settings] = None,
+) -> List[Dict[str, Any]]:
+    """Return last n turns oldest-first for a conversation (prior exchanges only)."""
+    async with get_connection(settings) as db:
+        cur = await db.execute(
+            """
+            SELECT query_text, response FROM query_history
+            WHERE farmer_id = ? AND conversation_id = ?
+            ORDER BY timestamp DESC LIMIT ?
+            """,
+            (farmer_id, conversation_id, n),
+        )
+        rows = await cur.fetchall()
+    return [dict(r) for r in reversed(rows)]
 
 
 async def get_sync_meta(key: str, settings: Optional[Settings] = None) -> Optional[str]:
@@ -214,7 +240,7 @@ async def fetch_unsynced_query_rows(
     async with get_connection(settings) as db:
         cur = await db.execute(
             """
-            SELECT id, farmer_id, query_text, intent, response, timestamp, data_source
+            SELECT id, farmer_id, query_text, intent, response, timestamp, data_source, conversation_id
             FROM query_history WHERE synced = 0 ORDER BY id
             """
         )

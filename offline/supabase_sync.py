@@ -51,6 +51,7 @@ class SupabaseSync:
                     row["response"] or "",
                     row["data_source"] or "",
                     sqlite_timestamp_unix=int(row["timestamp"]),
+                    conversation_id=row.get("conversation_id"),
                     settings=self.settings,
                 )
                 await sqlite_client.mark_query_history_synced(int(row["id"]), self.settings)

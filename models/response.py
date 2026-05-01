@@ -21,6 +21,7 @@ class StructuredResult(BaseModel):
 
 class AgentResponse(BaseModel):
     response_id: str = Field(default_factory=lambda: str(uuid4()))
+    conversation_id: Optional[str] = None
     text: str = ""
     structured: StructuredResult = Field(default_factory=StructuredResult)
     data_source: DataSource = "live"

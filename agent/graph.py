@@ -21,8 +21,10 @@ from langgraph.graph import END, StateGraph
 
 from agent.connectivity_router import data_source_for_route, resolve_route
 from agent.gemma_client import generate, generate_stream
+from agent.history import build_chat_history_context
 from config.settings import Settings, get_settings
 from db.persistence import persist_log_query, resolve_farmer_twin
+from db.sqlite_client import get_last_n_turns
 from models.errors import KrishiHTTPException
 from models.farmer import FarmerTwin
 from models.request import AgentRequest
@@ -67,7 +69,12 @@ Your job:
 - Never lead with unrelated suggestions or alternatives before answering what was asked.
 - Match the farmer's language (Hindi/Hinglish if their query is in Hindi).
 
-If a vision tool returned is_agricultural=false: briefly describe what the image shows using the description field, then politely explain your specialization (crop disease, soil, schemes, weather, farm advice) using specialization_note—do not pretend it is a crop disease."""
+If a vision tool returned is_agricultural=false: briefly describe what the image shows using the description field, then politely explain your specialization (crop disease, soil, schemes, weather, farm advice) using specialization_note—do not pretend it is a crop disease.
+
+CHAT HISTORY (when present in the JSON payload): previous turns; assistant replies may be truncated to 250 chars.
+Use only to understand what the current question refers to. Never re-answer old questions unless the user asks again.
+If details appear cut off, answer what is clear and invite a follow-up.
+If chat_history is empty or absent, ignore this section entirely."""
 
 # ------------------------------ state ------------------------------
 
@@ -78,6 +85,7 @@ class AgentState(TypedDict, total=False):
     data_source: str
     prefer_local: bool
     offline: bool
+    chat_history: List[Dict[str, Any]]
     tool_plan: List[Dict[str, Any]]
     tool_results: Dict[str, Any]
     tool_trace: Annotated[List[str], operator.add]
@@ -135,6 +143,13 @@ WHEN TO USE clarify instead of tools:
 Return {"clarify": true, "question": "..."} with ONE focused question.
 
 WHEN NOT to clarify: if intent is reasonably clear, pick tools. Do not over-ask.
+
+CHAT HISTORY (when chat_history in input JSON is non-empty):
+- Contains last ≤3 prior turns for this conversation only. Responses may be truncated to 250 chars.
+- Use ONLY to resolve references in the current query ("woh wali fasal", "us mein", "aur kya?").
+- Do NOT infer tool parameters from history unless the current query clearly refers to them.
+- If a key detail looks cut off, prefer clarify over guessing.
+- If chat_history is empty or absent, ignore this section entirely.
 """
 
 
@@ -185,8 +200,25 @@ def _normalize_tool_plan(raw_tools: Any, settings: Settings) -> List[Dict[str, A
     return out
 
 
+async def _load_chat_history(req: AgentRequest, settings: Settings) -> List[Dict[str, Any]]:
+    """Prior turns only (SQLite); empty when no conversation_id."""
+    cid = (req.conversation_id or "").strip()
+    if not cid:
+        return []
+    try:
+        turns = await get_last_n_turns(req.farmer_id, cid, n=3, settings=settings)
+        return build_chat_history_context(turns)
+    except Exception as e:
+        logger.warning("chat history load failed: %s", e)
+        return []
+
+
 async def _plan_with_llm(
-    req: AgentRequest, prefer_local: bool, settings: Settings
+    req: AgentRequest,
+    prefer_local: bool,
+    settings: Settings,
+    *,
+    chat_history: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     twin = await resolve_farmer_twin(req.farmer_id, req.context.connectivity, settings)
     twin_payload: Optional[Dict[str, Any]] = None
@@ -198,12 +230,14 @@ async def _plan_with_llm(
             "risk_profile": twin.risk_profile,
             "preferred_language": twin.preferred_language,
         }
+    hist = chat_history if chat_history is not None else []
     user = json.dumps(
         {
             "farmer_id": req.farmer_id,
             "farmer_profile": twin_payload,
             "query": req.query.model_dump(),
             "context": req.context.model_dump(),
+            "chat_history": hist,
         },
         ensure_ascii=False,
     )
@@ -413,9 +447,15 @@ async def node_plan(state: AgentState) -> Dict[str, Any]:
     settings = get_settings()
     req = state["request"]
     prefer_local = bool(state.get("prefer_local"))
-    plan = await _plan_with_llm(req, prefer_local=prefer_local, settings=settings)
+    chat_hist = await _load_chat_history(req, settings)
+    plan = await _plan_with_llm(
+        req,
+        prefer_local=prefer_local,
+        settings=settings,
+        chat_history=chat_hist,
+    )
     model_used = settings.ollama_model if prefer_local else settings.ai_studio_model
-    return {"tool_plan": plan, "model_used": model_used}
+    return {"tool_plan": plan, "model_used": model_used, "chat_history": chat_hist}
 
 
 async def node_clarify(state: AgentState) -> Dict[str, Any]:
@@ -457,7 +497,11 @@ async def node_synthesize(state: AgentState) -> Dict[str, Any]:
     settings = get_settings()
     req = state["request"]
     payload = json.dumps(
-        {"tools": state.get("tool_results"), "user_query": req.query.text},
+        {
+            "tools": state.get("tool_results"),
+            "user_query": req.query.text,
+            "chat_history": state.get("chat_history") or [],
+        },
         ensure_ascii=False,
     )[:12000]
     messages = [
@@ -512,7 +556,11 @@ async def node_safety(state: AgentState) -> Dict[str, Any]:
         and not state.get("_escalated")  # type: ignore[typeddict-item]
     ):
         payload = json.dumps(
-            {"tools": tool_results, "user_query": state["request"].query.text},
+            {
+                "tools": tool_results,
+                "user_query": state["request"].query.text,
+                "chat_history": state.get("chat_history") or [],
+            },
             ensure_ascii=False,
         )[:12000]
         messages = [
@@ -652,6 +700,7 @@ async def run_graph_stream(
             confidence_score=float(state.get("confidence_score") or 1.0),
             fallback_hint=state.get("fallback_hint"),  # type: ignore[arg-type]
         )
+        resp.conversation_id = rq.conversation_id
         try:
             await persist_log_query(
                 rq.farmer_id,
@@ -660,7 +709,8 @@ async def run_graph_stream(
                 resp.text[:2000],
                 resp.data_source,
                 rq.context.connectivity,
-                settings,
+                conversation_id=rq.conversation_id,
+                settings=settings,
             )
         except Exception as e:
             logger.warning("log_query failed: %s", e)
@@ -676,7 +726,11 @@ async def run_graph_stream(
     yield ("data-stage", {"data": {"stage": "synthesizing"}})
     rq = req
     payload = json.dumps(
-        {"tools": state.get("tool_results"), "user_query": rq.query.text},
+        {
+            "tools": state.get("tool_results"),
+            "user_query": rq.query.text,
+            "chat_history": state.get("chat_history") or [],
+        },
         ensure_ascii=False,
     )[:12000]
     messages = [
@@ -728,6 +782,7 @@ async def run_graph_stream(
         confidence_score=float(state.get("confidence_score") or 0.5),
         fallback_hint=state.get("fallback_hint"),  # type: ignore[arg-type]
     )
+    resp.conversation_id = rq.conversation_id
     try:
         await persist_log_query(
             rq.farmer_id,
@@ -736,7 +791,8 @@ async def run_graph_stream(
             resp.text[:2000],
             resp.data_source,
             rq.context.connectivity,
-            settings,
+            conversation_id=rq.conversation_id,
+            settings=settings,
         )
     except Exception as e:
         logger.warning("log_query failed: %s", e)

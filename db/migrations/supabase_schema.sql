@@ -70,3 +70,10 @@ CREATE POLICY "Users manage own queries" ON public.query_history
 
 CREATE POLICY "Public read scheme vectors" ON public.scheme_vectors
   FOR SELECT TO authenticated, anon USING (true);
+
+-- Optional conversation threading (client-generated id); no separate conversations table.
+ALTER TABLE public.query_history
+  ADD COLUMN IF NOT EXISTS conversation_id TEXT;
+
+CREATE INDEX IF NOT EXISTS query_history_conv_ts
+  ON public.query_history (farmer_id, conversation_id, "timestamp" DESC);

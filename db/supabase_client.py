@@ -219,6 +219,7 @@ async def insert_query_history_remote(
     data_source: str,
     *,
     sqlite_timestamp_unix: Optional[int] = None,
+    conversation_id: Optional[str] = None,
     settings: Optional[Settings] = None,
 ) -> None:
     settings = settings or get_settings()
@@ -235,6 +236,8 @@ async def insert_query_history_remote(
         "timestamp": ts_iso,
         "data_source": data_source,
     }
+    if conversation_id:
+        row["conversation_id"] = conversation_id
     headers = dict(_headers_svc(settings))
     url = _join_rest(settings, "query_history")
     async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:

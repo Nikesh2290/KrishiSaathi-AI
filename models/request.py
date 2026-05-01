@@ -23,5 +23,6 @@ class ContextPayload(BaseModel):
 
 class AgentRequest(BaseModel):
     farmer_id: str
+    conversation_id: Optional[str] = None
     query: QueryPayload = Field(default_factory=QueryPayload)
     context: ContextPayload = Field(default_factory=ContextPayload)
