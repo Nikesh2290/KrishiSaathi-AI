@@ -8,6 +8,57 @@ from modules.climate import engine as climate_engine
 
 
 @pytest.mark.asyncio
+async def test_get_weather_widget_shape(monkeypatch):
+    class FakeResp:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "current": {
+                    "temperature_2m": 28.0,
+                    "apparent_temperature": 29.0,
+                    "relative_humidity_2m": 55.0,
+                    "weather_code": 0,
+                    "wind_speed_10m": 12.0,
+                    "precipitation": 0.0,
+                },
+                "daily": {
+                    "time": [f"2026-05-0{i}" for i in range(1, 6)],
+                    "temperature_2m_max": [33.0] * 5,
+                    "temperature_2m_min": [18.0] * 5,
+                    "precipitation_sum": [0.0] * 5,
+                    "precipitation_probability_max": [10.0] * 5,
+                    "weather_code": [0, 1, 2, 3, 61],
+                },
+            }
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return None
+
+        async def get(self, url, params=None):
+            return FakeResp()
+
+    monkeypatch.setattr("modules.climate.engine.httpx.AsyncClient", lambda timeout=30.0: FakeClient())
+    out = await climate_engine.get_weather_widget(30.0, 75.0)
+    assert "current" in out
+    assert len(out["forecast"]) == 5
+    assert out["current"]["condition"] == "Clear sky"
+    assert out["forecast"][-1]["condition"] == "Rain"
+
+
+def test_wmo_weather_condition():
+    assert climate_engine.wmo_weather_condition(0) == "Clear sky"
+    assert climate_engine.wmo_weather_condition(95) == "Thunderstorm"
+
+
+@pytest.mark.asyncio
 async def test_get_weather_shape(monkeypatch):
     class FakeResp:
         status_code = 200
