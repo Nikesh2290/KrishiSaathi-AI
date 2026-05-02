@@ -19,6 +19,8 @@ Most endpoints return JSON. The offline bundle endpoint returns **gzipped JSON**
 | POST | `/api/v1/sync/push` | Push unsynced local SQLite data to Supabase (optional) |
 | POST | `/api/v1/conversation` | Create a new chat session (`conversation_id` + metadata) |
 | GET | `/api/v1/farmer/{farmer_id}/conversations` | List all `conversation_id` values (sessions) for a farmer |
+| GET | `/api/v1/farmer/{farmer_id}/conversations/{conversation_id}/history` | Session transcript (`messages` + metadata) |
+| DELETE | `/api/v1/farmer/{farmer_id}/conversations/{conversation_id}` | Delete session and all turns (queues for Supabase when offline) |
 | GET | `/api/v1/farmer/{farmer_id}/twin` | Read digital twin |
 | PUT | `/api/v1/farmer/{farmer_id}/twin` | Update twin |
 
@@ -148,6 +150,36 @@ Array of session metadata objects (newest first by `created_at`):
   }
 ]
 ```
+
+## 5a. `GET /api/v1/farmer/{farmer_id}/conversations/{conversation_id}/history`
+
+**Query params**
+
+- `connectivity` (string, optional): default `online`; `offline` reads SQLite only.
+
+**Response 200**
+
+Session metadata plus `messages` (oldest first): each message has `id`, `query_text`, `intent`, `response`, `timestamp`, `data_source`, `conversation_id`.
+
+**404** — session missing or `farmer_id` does not own this `conversation_id`.
+
+## 5b. `DELETE /api/v1/farmer/{farmer_id}/conversations/{conversation_id}`
+
+**Query params**
+
+- `connectivity` (string, optional): default `online`. Use `offline` to remove locally and enqueue deletion for the next Supabase sync (`POST /api/v1/sync/push` or app startup sync).
+
+**Response 200**
+
+```json
+{
+  "deleted": true,
+  "conversation_id": "550e8400-e29b-41d4-a716-446655440000",
+  "farmer_id": "uuid-or-demo-id"
+}
+```
+
+**404** — session missing or `farmer_id` does not own this `conversation_id`.
 
 ## 6. `POST /api/v1/query`
 
@@ -331,6 +363,7 @@ Payload (after gunzip):
 **What it does / used for**
 
 - Pushes unsynced local SQLite data to Supabase (if configured):
+  - pending conversation deletions (drained first)
   - farmer twin rows
   - conversation metadata rows
   - query history rows
@@ -353,6 +386,7 @@ If sync ran:
 ```json
 {
   "ok": true,
+  "conversation_deletes_drained": 0,
   "farmer_twins_synced": 0,
   "conversation_metadata_synced": 0,
   "query_rows_synced": 0,
@@ -360,6 +394,7 @@ If sync ran:
 }
 ```
 
+- `conversation_deletes_drained` (number): offline-queued session deletes applied on Supabase.
 - `farmer_twins_synced` (number): number of twin rows uploaded.
 - `conversation_metadata_synced` (number): number of conversation session rows uploaded.
 - `query_rows_synced` (number): number of query logs uploaded.

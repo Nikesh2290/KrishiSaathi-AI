@@ -8,11 +8,13 @@ from typing import Any, Dict, List, Optional
 from config.settings import Settings, get_settings
 from db import supabase_client
 from db.sqlite_client import (
+    delete_conversation_local,
     get_conversation_metadata,
     get_conversations_by_farmer,
     get_farmer_twin,
     get_query_history_for_conversation,
     log_query,
+    queue_pending_delete,
     upsert_conversation_metadata,
     upsert_farmer_twin,
 )
@@ -151,6 +153,53 @@ async def resolve_conversation_history(
         return None
     messages = await get_query_history_for_conversation(cid, settings)
     return {"meta": meta, "messages": messages}
+
+
+async def delete_conversation(
+    farmer_id: str,
+    conversation_id: str,
+    connectivity: str,
+    settings: Optional[Settings] = None,
+) -> Optional[bool]:
+    """Verify ownership, delete local data and remote when online; queue for Supabase if offline or remote fails."""
+    settings = settings or get_settings()
+    cid = (conversation_id or "").strip()
+    if not cid:
+        return None
+
+    offline = is_offline_context(connectivity) or not settings.supabase_db_configured
+
+    owner_verified_via_remote = False
+    if not offline:
+        try:
+            meta = await supabase_client.get_conversation_metadata_remote(cid, settings)
+            if meta is not None and str(meta.get("farmer_id")) == str(farmer_id):
+                owner_verified_via_remote = True
+            elif meta is not None:
+                return None
+        except Exception as e:
+            logger.warning("Remote conversation metadata for delete failed, using local: %s", e)
+
+    if not owner_verified_via_remote:
+        meta = await get_conversation_metadata(cid, settings)
+        if not meta or str(meta.get("farmer_id")) != str(farmer_id):
+            return None
+
+    remote_ok = False
+    if not offline:
+        try:
+            await supabase_client.delete_conversation_remote(cid, settings)
+            remote_ok = True
+        except Exception as e:
+            logger.warning("Remote conversation delete failed: %s", e)
+
+    await delete_conversation_local(cid, settings)
+
+    need_queue = bool(settings.supabase_db_configured) and (offline or not remote_ok)
+    if need_queue:
+        await queue_pending_delete("conversation", cid, str(farmer_id), settings)
+
+    return True
 
 
 async def persist_log_query(

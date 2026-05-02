@@ -385,6 +385,35 @@ async def get_query_history_by_conversation_remote(
     return rows
 
 
+async def delete_conversation_remote(
+    conversation_id: str, settings: Optional[Settings] = None
+) -> None:
+    """Delete query turns then conversation row in Supabase (FK would only NULL query rows)."""
+    settings = settings or get_settings()
+    if not settings.supabase_db_configured:
+        return
+    from urllib.parse import urlencode
+
+    cid = (conversation_id or "").strip()
+    if not cid:
+        return
+    filt = urlencode({"conversation_id": f"eq.{cid}"})
+    headers = dict(_headers_svc(settings))
+    qh_url = _join_rest(settings, "query_history") + f"?{filt}"
+    cm_url = _join_rest(settings, "conversation_metadata") + f"?{filt}"
+    async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
+        r1 = await client.delete(qh_url, headers=headers)
+        if r1.status_code >= 400:
+            raise RuntimeError(
+                r1.text[:500] if r1.text else f"delete query_history failed: {r1.status_code}"
+            )
+        r2 = await client.delete(cm_url, headers=headers)
+        if r2.status_code >= 400:
+            raise RuntimeError(
+                r2.text[:500] if r2.text else f"delete conversation_metadata failed: {r2.status_code}"
+            )
+
+
 def _match_schemes_via_http(settings: Settings, query_embedding: List[float], k: int) -> List[Dict[str, Any]]:
     """Sync httpx wrapper for embedding path (runs in threadpool if needed)."""
     url = _join_rest(settings, "rpc/match_scheme_vectors")
