@@ -38,9 +38,17 @@ CREATE TABLE IF NOT EXISTS price_cache (
     unit TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS conversation_metadata (
+    conversation_id TEXT PRIMARY KEY,
+    farmer_id TEXT NOT NULL,
+    title TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    synced INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS query_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    farmer_id TEXT,
     query_text TEXT,
     intent TEXT,
     response TEXT,
@@ -82,6 +90,30 @@ async def _migrate_existing_db(db: aiosqlite.Connection) -> None:
         await db.execute("ALTER TABLE query_history ADD COLUMN synced INTEGER NOT NULL DEFAULT 0")
     if qh and "conversation_id" not in qh:
         await db.execute("ALTER TABLE query_history ADD COLUMN conversation_id TEXT")
+
+    cur = await db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='conversation_metadata'"
+    )
+    cm_row = await cur.fetchone()
+    if not cm_row:
+        await db.executescript(
+            """
+            CREATE TABLE conversation_metadata (
+                conversation_id TEXT PRIMARY KEY,
+                farmer_id TEXT NOT NULL,
+                title TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                synced INTEGER NOT NULL DEFAULT 0
+            );
+            """
+        )
+
+    cm = await _cols("conversation_metadata")
+    if cm and "synced" not in cm:
+        await db.execute(
+            "ALTER TABLE conversation_metadata ADD COLUMN synced INTEGER NOT NULL DEFAULT 0"
+        )
 
 
 async def init_db(settings: Optional[Settings] = None) -> None:
@@ -142,8 +174,77 @@ async def upsert_farmer_twin(
         await db.commit()
 
 
-async def log_query(
+async def upsert_conversation_metadata(
+    conversation_id: str,
     farmer_id: str,
+    title: Optional[str],
+    settings: Optional[Settings] = None,
+    *,
+    synced: int = 0,
+) -> None:
+    now = int(time.time())
+    if not conversation_id.strip():
+        raise ValueError("conversation_id is required")
+    async with get_connection(settings) as db:
+        await db.execute(
+            """
+            INSERT INTO conversation_metadata (
+                conversation_id, farmer_id, title, created_at, updated_at, synced
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(conversation_id) DO UPDATE SET
+              farmer_id = excluded.farmer_id,
+              title = COALESCE(excluded.title, conversation_metadata.title),
+              updated_at = excluded.updated_at,
+              synced = excluded.synced
+            """,
+            (
+                conversation_id.strip(),
+                farmer_id,
+                title,
+                now,
+                now,
+                synced,
+            ),
+        )
+        await db.commit()
+
+
+async def get_conversation_metadata(
+    conversation_id: str, settings: Optional[Settings] = None
+) -> Optional[Dict[str, Any]]:
+    if not conversation_id.strip():
+        return None
+    async with get_connection(settings) as db:
+        cur = await db.execute(
+            """
+            SELECT conversation_id, farmer_id, title, created_at, updated_at, synced
+            FROM conversation_metadata WHERE conversation_id = ?
+            """,
+            (conversation_id.strip(),),
+        )
+        row = await cur.fetchone()
+    return dict(row) if row else None
+
+
+async def get_conversations_by_farmer(
+    farmer_id: str, settings: Optional[Settings] = None
+) -> List[Dict[str, Any]]:
+    async with get_connection(settings) as db:
+        cur = await db.execute(
+            """
+            SELECT conversation_id, farmer_id, title, created_at, updated_at
+            FROM conversation_metadata
+            WHERE farmer_id = ?
+            ORDER BY created_at DESC
+            """,
+            (farmer_id,),
+        )
+        rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def log_query(
     query_text: str,
     intent: str,
     response: str,
@@ -158,30 +259,32 @@ async def log_query(
         await db.execute(
             """
             INSERT INTO query_history (
-                farmer_id, query_text, intent, response, timestamp, data_source, conversation_id, synced
+                query_text, intent, response, timestamp, data_source, conversation_id, synced
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (farmer_id, query_text, intent, response, now, data_source, conversation_id, synced),
+            (query_text, intent, response, now, data_source, conversation_id, synced),
         )
         await db.commit()
 
 
 async def get_last_n_turns(
-    farmer_id: str,
     conversation_id: str,
     n: int = 3,
     settings: Optional[Settings] = None,
 ) -> List[Dict[str, Any]]:
     """Return last n turns oldest-first for a conversation (prior exchanges only)."""
+    cid = (conversation_id or "").strip()
+    if not cid:
+        return []
     async with get_connection(settings) as db:
         cur = await db.execute(
             """
             SELECT query_text, response FROM query_history
-            WHERE farmer_id = ? AND conversation_id = ?
+            WHERE conversation_id = ?
             ORDER BY timestamp DESC LIMIT ?
             """,
-            (farmer_id, conversation_id, n),
+            (cid, n),
         )
         rows = await cur.fetchall()
     return [dict(r) for r in reversed(rows)]
@@ -285,12 +388,37 @@ async def fetch_unsynced_query_rows(
     async with get_connection(settings) as db:
         cur = await db.execute(
             """
-            SELECT id, farmer_id, query_text, intent, response, timestamp, data_source, conversation_id
+            SELECT id, query_text, intent, response, timestamp, data_source, conversation_id
             FROM query_history WHERE synced = 0 ORDER BY id
             """
         )
         rows = await cur.fetchall()
     return [dict(r) for r in rows]
+
+
+async def fetch_unsynced_conversation_metadata(
+    settings: Optional[Settings] = None,
+) -> List[Dict[str, Any]]:
+    async with get_connection(settings) as db:
+        cur = await db.execute(
+            """
+            SELECT conversation_id, farmer_id, title, created_at, updated_at
+            FROM conversation_metadata WHERE synced = 0 ORDER BY created_at
+            """
+        )
+        rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def mark_conversation_metadata_synced(
+    conversation_id: str, settings: Optional[Settings] = None
+) -> None:
+    async with get_connection(settings) as db:
+        await db.execute(
+            "UPDATE conversation_metadata SET synced = 1 WHERE conversation_id = ?",
+            (conversation_id,),
+        )
+        await db.commit()
 
 
 async def mark_query_history_synced(row_id: int, settings: Optional[Settings] = None) -> None:

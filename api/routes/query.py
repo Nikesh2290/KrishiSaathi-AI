@@ -135,12 +135,12 @@ async def post_query(body: AgentRequest) -> AgentResponse:
     resp.conversation_id = body.conversation_id
     try:
         await persist_log_query(
-            body.farmer_id,
             body.query.text,
             resp.structured.kind,
             resp.text[:2000],
             resp.data_source,
             body.context.connectivity,
+            farmer_id=body.farmer_id,
             conversation_id=body.conversation_id,
             settings=settings,
         )

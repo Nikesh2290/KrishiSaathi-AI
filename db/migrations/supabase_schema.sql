@@ -9,9 +9,20 @@ CREATE TABLE IF NOT EXISTS public.farmer_twin (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS public.conversation_metadata (
+  conversation_id TEXT PRIMARY KEY,
+  farmer_id TEXT NOT NULL,
+  title TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS conv_meta_farmer_idx
+  ON public.conversation_metadata (farmer_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS public.query_history (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  farmer_id UUID NOT NULL REFERENCES auth.users (id) ON DELETE CASCADE,
+  conversation_id TEXT REFERENCES public.conversation_metadata (conversation_id) ON DELETE SET NULL,
   query_text TEXT,
   intent TEXT,
   response TEXT,
@@ -19,7 +30,8 @@ CREATE TABLE IF NOT EXISTS public.query_history (
   data_source TEXT
 );
 
-CREATE INDEX IF NOT EXISTS query_history_farmer_ts ON public.query_history (farmer_id, "timestamp" DESC);
+CREATE INDEX IF NOT EXISTS query_history_conv_ts
+  ON public.query_history (conversation_id, "timestamp" DESC);
 
 CREATE TABLE IF NOT EXISTS public.scheme_vectors (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -57,23 +69,4 @@ $$;
 
 COMMENT ON FUNCTION public.match_scheme_vectors IS 'Cosine similarity search for scheme embeddings (aligned with Chroma DefaultEmbeddingFunction).';
 
--- Prefer server-side reads/writes using SUPABASE_SERVICE_ROLE_KEY (RLS bypassed for service_role).
-ALTER TABLE public.farmer_twin ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.query_history ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.scheme_vectors ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY "Users manage own twin" ON public.farmer_twin
-  FOR ALL TO authenticated USING (auth.uid() = farmer_id) WITH CHECK (auth.uid() = farmer_id);
-
-CREATE POLICY "Users manage own queries" ON public.query_history
-  FOR ALL TO authenticated USING (auth.uid() = farmer_id) WITH CHECK (auth.uid() = farmer_id);
-
-CREATE POLICY "Public read scheme vectors" ON public.scheme_vectors
-  FOR SELECT TO authenticated, anon USING (true);
-
--- Optional conversation threading (client-generated id); no separate conversations table.
-ALTER TABLE public.query_history
-  ADD COLUMN IF NOT EXISTS conversation_id TEXT;
-
-CREATE INDEX IF NOT EXISTS query_history_conv_ts
-  ON public.query_history (farmer_id, conversation_id, "timestamp" DESC);
+-- Migrating older projects: manually ALTER query_history DROP farmer_id etc. if upgrading from legacy schema.

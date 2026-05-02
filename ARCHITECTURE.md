@@ -362,13 +362,24 @@ CREATE TABLE price_cache (
     unit         TEXT
 );
 
+CREATE TABLE conversation_metadata (
+    conversation_id TEXT PRIMARY KEY,
+    farmer_id       TEXT NOT NULL,
+    title           TEXT,
+    created_at      INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL,
+    synced          INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE query_history (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    query_text   TEXT,
-    intent       TEXT,
-    response     TEXT,
-    timestamp    INTEGER,
-    data_source  TEXT
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    query_text      TEXT,
+    intent          TEXT,
+    response        TEXT,
+    timestamp       INTEGER NOT NULL,
+    data_source     TEXT,
+    conversation_id TEXT,
+    synced          INTEGER NOT NULL DEFAULT 0
 );
 ```
 
@@ -385,11 +396,13 @@ REST + JSON; **frontend is separate** (RN app) — integrate via OpenAPI (`/docs
 | `GET` | `/api/v1/health` | Liveness + Gemma 4 reachability |
 | `POST` | `/api/v1/query` | Main agent query (references uploaded images via `image_ref`) |
 | `POST` | `/api/v1/query/image` | Multipart image upload (JPEG/PNG ≤ 5 MB) → returns `image_ref` |
+| `POST` | `/api/v1/conversation` | Create chat session; returns `conversation_id` |
+| `GET` | `/api/v1/farmer/{farmer_id}/conversations` | List sessions / `conversation_id` values for a farmer |
 | `GET` | `/api/v1/sync/bundle` | District-scoped offline bundle (gzipped JSON, ETag-style `bundle_version`) |
 | `GET` | `/api/v1/farmer/{farmer_id}/twin` | Read digital twin |
 | `PUT` | `/api/v1/farmer/{farmer_id}/twin` | Update twin (partial OK) |
 
-All non-2xx responses use the unified error envelope defined in [`docs/api_contract.md`](docs/api_contract.md) §6, including a `fallback_hint` (`USE_ONDEVICE` / `RETRY_ONLINE_LATER` / `null`) that the RN app uses to choose between on-device re-run and a retry CTA.
+All non-2xx responses use the unified error envelope defined in [`docs/api_contract.md`](docs/api_contract.md) §12, including a `fallback_hint` (`USE_ONDEVICE` / `RETRY_ONLINE_LATER` / `null`) that the RN app uses to choose between on-device re-run and a retry CTA.
 
 ### `POST /api/v1/query`
 
@@ -398,6 +411,7 @@ All non-2xx responses use the unified error envelope defined in [`docs/api_contr
 ```json
 {
   "farmer_id": "uuid",
+  "conversation_id": "optional-thread-uuid-from-POST-conversation",
   "query": {
     "text": "मेरी गेहूं की फसल पीली पड़ रही है",
     "image_ref": "img_7a3f...",

@@ -220,7 +220,7 @@ async def _load_chat_history(req: AgentRequest, settings: Settings) -> List[Dict
     if not cid:
         return []
     try:
-        turns = await get_last_n_turns(req.farmer_id, cid, n=3, settings=settings)
+        turns = await get_last_n_turns(cid, n=3, settings=settings)
         return build_chat_history_context(turns)
     except Exception as e:
         logger.warning("chat history load failed: %s", e)
@@ -719,12 +719,12 @@ async def run_graph_stream(
         resp.conversation_id = rq.conversation_id
         try:
             await persist_log_query(
-                rq.farmer_id,
                 rq.query.text,
                 resp.structured.kind,
                 resp.text[:2000],
                 resp.data_source,
                 rq.context.connectivity,
+                farmer_id=rq.farmer_id,
                 conversation_id=rq.conversation_id,
                 settings=settings,
             )
@@ -803,12 +803,12 @@ async def run_graph_stream(
     resp.conversation_id = rq.conversation_id
     try:
         await persist_log_query(
-            rq.farmer_id,
             rq.query.text,
             resp.structured.kind,
             resp.text[:2000],
             resp.data_source,
             rq.context.connectivity,
+            farmer_id=rq.farmer_id,
             conversation_id=rq.conversation_id,
             settings=settings,
         )

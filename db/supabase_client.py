@@ -208,11 +208,79 @@ async def upsert_farmer_twin_remote(twin: FarmerTwin, settings: Optional[Setting
         raise RuntimeError(txt or str(r.status_code))
 
 
+# --- Conversation metadata ---
+
+
+async def upsert_conversation_metadata_remote(
+    conversation_id: str,
+    farmer_id: str,
+    title: Optional[str],
+    *,
+    created_at_unix: Optional[int] = None,
+    updated_at_unix: Optional[int] = None,
+    settings: Optional[Settings] = None,
+) -> None:
+    settings = settings or get_settings()
+    if not settings.supabase_db_configured:
+        return
+    created_iso = _utc_now_iso()
+    updated_iso = created_iso
+    if created_at_unix is not None:
+        created_iso = datetime.fromtimestamp(
+            created_at_unix, tz=timezone.utc
+        ).isoformat()
+    if updated_at_unix is not None:
+        updated_iso = datetime.fromtimestamp(
+            updated_at_unix, tz=timezone.utc
+        ).isoformat()
+    row: Dict[str, Any] = {
+        "conversation_id": conversation_id.strip(),
+        "farmer_id": farmer_id,
+        "title": title,
+        "created_at": created_iso,
+        "updated_at": updated_iso,
+    }
+    headers = dict(_headers_svc(settings))
+    headers["Prefer"] = "resolution=merge-duplicates"
+    url = _join_rest(settings, "conversation_metadata?on_conflict=conversation_id")
+    async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
+        r = await client.post(url, headers=headers, json=row)
+    if r.status_code >= 400:
+        raise RuntimeError(r.text[:500])
+
+
+async def get_conversations_by_farmer_remote(
+    farmer_id: str, settings: Optional[Settings] = None
+) -> List[Dict[str, Any]]:
+    settings = settings or get_settings()
+    if not settings.supabase_db_configured:
+        return []
+    from urllib.parse import urlencode
+
+    q = urlencode(
+        {
+            "farmer_id": f"eq.{farmer_id}",
+            "select": "conversation_id,farmer_id,title,created_at,updated_at",
+            "order": "created_at.desc",
+        }
+    )
+    url = _join_rest(settings, "conversation_metadata") + f"?{q}"
+    headers = dict(_headers_svc(settings))
+    async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
+        r = await client.get(url, headers=headers)
+    if r.status_code >= 400:
+        logger.warning("get_conversations_by_farmer_remote: %s %s", r.status_code, r.text[:200])
+        return []
+    data = r.json()
+    if not isinstance(data, list):
+        return []
+    return data
+
+
 # --- Query history ---
 
 
 async def insert_query_history_remote(
-    farmer_id: str,
     query_text: str,
     intent: str,
     response: str,
@@ -229,7 +297,6 @@ async def insert_query_history_remote(
     if sqlite_timestamp_unix is not None:
         ts_iso = datetime.fromtimestamp(sqlite_timestamp_unix, tz=timezone.utc).isoformat()
     row = {
-        "farmer_id": farmer_id,
         "query_text": query_text,
         "intent": intent,
         "response": response,
