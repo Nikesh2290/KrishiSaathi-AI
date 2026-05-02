@@ -268,6 +268,27 @@ async def log_query(
         await db.commit()
 
 
+async def get_query_history_for_conversation(
+    conversation_id: str, settings: Optional[Settings] = None
+) -> List[Dict[str, Any]]:
+    """All logged turns for a session, oldest first."""
+    cid = (conversation_id or "").strip()
+    if not cid:
+        return []
+    async with get_connection(settings) as db:
+        cur = await db.execute(
+            """
+            SELECT id, query_text, intent, response, timestamp, data_source, conversation_id
+            FROM query_history
+            WHERE conversation_id = ?
+            ORDER BY timestamp ASC
+            """,
+            (cid,),
+        )
+        rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
 async def get_last_n_turns(
     conversation_id: str,
     n: int = 3,

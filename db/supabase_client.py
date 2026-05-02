@@ -277,6 +277,37 @@ async def get_conversations_by_farmer_remote(
     return data
 
 
+async def get_conversation_metadata_remote(
+    conversation_id: str, settings: Optional[Settings] = None
+) -> Optional[Dict[str, Any]]:
+    settings = settings or get_settings()
+    if not settings.supabase_db_configured:
+        return None
+    from urllib.parse import urlencode
+
+    cid = (conversation_id or "").strip()
+    if not cid:
+        return None
+    q = urlencode(
+        {
+            "conversation_id": f"eq.{cid}",
+            "select": "conversation_id,farmer_id,title,created_at,updated_at",
+        }
+    )
+    url = _join_rest(settings, "conversation_metadata") + f"?{q}"
+    headers = dict(_headers_svc(settings))
+    async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
+        r = await client.get(url, headers=headers)
+    if r.status_code >= 400:
+        logger.warning("get_conversation_metadata_remote: %s %s", r.status_code, r.text[:200])
+        return None
+    data = r.json()
+    if isinstance(data, list) and data:
+        row = data[0]
+        return dict(row) if isinstance(row, dict) else None
+    return None
+
+
 # --- Query history ---
 
 
@@ -311,6 +342,47 @@ async def insert_query_history_remote(
         r = await client.post(url, headers=headers, json=row)
     if r.status_code >= 400:
         raise RuntimeError(r.text[:500])
+
+
+def _query_history_ts_sort_key(row: Dict[str, Any]) -> float:
+    v = row.get("timestamp")
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str) and v:
+        try:
+            s = v.replace("Z", "+00:00")
+            return datetime.fromisoformat(s).timestamp()
+        except Exception:
+            return 0.0
+    return 0.0
+
+
+async def get_query_history_by_conversation_remote(
+    conversation_id: str, settings: Optional[Settings] = None
+) -> List[Dict[str, Any]]:
+    settings = settings or get_settings()
+    if not settings.supabase_db_configured:
+        return []
+    from urllib.parse import urlencode
+
+    cid = (conversation_id or "").strip()
+    if not cid:
+        return []
+    # select=* avoids PostgREST quirks with the reserved column name "timestamp"; sort in-process.
+    q = urlencode({"conversation_id": f"eq.{cid}", "select": "*"})
+    url = _join_rest(settings, "query_history") + f"?{q}"
+    headers = dict(_headers_svc(settings))
+    async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
+        r = await client.get(url, headers=headers)
+    if r.status_code >= 400:
+        logger.warning("get_query_history_by_conversation_remote: %s %s", r.status_code, r.text[:200])
+        return []
+    data = r.json()
+    if not isinstance(data, list):
+        return []
+    rows = [dict(row) for row in data if isinstance(row, dict)]
+    rows.sort(key=_query_history_ts_sort_key)
+    return rows
 
 
 def _match_schemes_via_http(settings: Settings, query_embedding: List[float], k: int) -> List[Dict[str, Any]]:

@@ -6,11 +6,15 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from config.settings import get_settings
-from db.persistence import persist_conversation_metadata, resolve_conversations_by_farmer
+from db.persistence import (
+    persist_conversation_metadata,
+    resolve_conversation_history,
+    resolve_conversations_by_farmer,
+)
 from db.sqlite_client import get_conversation_metadata
 
 router = APIRouter(prefix="/api/v1", tags=["conversation"])
@@ -30,6 +34,25 @@ def _serialize_conversation_row(row: Dict[str, Any]) -> Dict[str, Any]:
             out[key] = datetime.fromtimestamp(v, tz=timezone.utc).isoformat()
     # Never expose sync flag to clients
     out.pop("synced", None)
+    return out
+
+
+def _serialize_history_message(row: Dict[str, Any]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {
+        "query_text": row.get("query_text"),
+        "intent": row.get("intent"),
+        "response": row.get("response"),
+        "data_source": row.get("data_source"),
+        "conversation_id": row.get("conversation_id"),
+    }
+    rid = row.get("id")
+    if rid is not None:
+        out["id"] = str(rid)
+    ts = row.get("timestamp")
+    if isinstance(ts, int):
+        out["timestamp"] = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+    else:
+        out["timestamp"] = ts
     return out
 
 
@@ -69,3 +92,25 @@ async def list_conversations(
 ) -> List[Dict[str, Any]]:
     rows = await resolve_conversations_by_farmer(farmer_id, connectivity, get_settings())
     return [_serialize_conversation_row(dict(r)) for r in rows]
+
+
+@router.get("/farmer/{farmer_id}/conversations/{conversation_id}/history")
+async def get_conversation_history(
+    farmer_id: str,
+    conversation_id: str,
+    connectivity: str = Query(
+        "online",
+        description="offline = read SQLite only",
+    ),
+) -> Dict[str, Any]:
+    bundle = await resolve_conversation_history(
+        farmer_id, conversation_id, connectivity, get_settings()
+    )
+    if not bundle:
+        raise HTTPException(
+            status_code=404,
+            detail="conversation not found or access denied",
+        )
+    meta = _serialize_conversation_row(dict(bundle["meta"]))
+    messages = [_serialize_history_message(dict(m)) for m in bundle["messages"]]
+    return {**meta, "messages": messages}
