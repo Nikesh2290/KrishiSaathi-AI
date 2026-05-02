@@ -82,6 +82,11 @@ class Settings(BaseSettings):
         alias="CLIMATE_TIMEOUT_SECONDS",
         description="Cap for live weather HTTP fetch (Open-Meteo).",
     )
+    weather_cache_ttl_seconds: int = Field(
+        default=86400,
+        alias="WEATHER_CACHE_TTL_SECONDS",
+        description="TTL for home-screen weather cache in SQLite (seconds). Default 24 h.",
+    )
     io_tool_timeout_seconds: float = Field(
         default=5.0,
         alias="IO_TOOL_TIMEOUT_SECONDS",

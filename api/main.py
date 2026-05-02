@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routes import auth, farmer, health, query, sync
+from api.routes import auth, farmer, health, query, sync, weather
 from api.middleware.request_logging import install_request_logging
 from config.logging import configure_logging
 from config.settings import get_settings
@@ -62,6 +62,7 @@ def create_app() -> FastAPI:
     app.include_router(farmer.router)
     app.include_router(health.router)
     app.include_router(sync.router)
+    app.include_router(weather.router)
     return app
 
 

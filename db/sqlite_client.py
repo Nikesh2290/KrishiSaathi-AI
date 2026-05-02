@@ -208,6 +208,51 @@ async def set_sync_meta(key: str, value: str, settings: Optional[Settings] = Non
         await db.commit()
 
 
+async def get_weather_cache(
+    location_key: str, settings: Optional[Settings] = None
+) -> Optional[Tuple[Dict[str, Any], int, int]]:
+    """Return (payload dict, fetched_at unix, expires_at unix) if row exists and not expired."""
+    now = int(time.time())
+    async with get_connection(settings) as db:
+        cur = await db.execute(
+            """
+            SELECT payload, fetched_at, expires_at FROM weather_cache
+            WHERE location_key = ? AND expires_at > ?
+            """,
+            (location_key, now),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return None
+        return (json.loads(row["payload"]), int(row["fetched_at"]), int(row["expires_at"]))
+
+
+async def set_weather_cache(
+    location_key: str,
+    payload: Dict[str, Any],
+    ttl_seconds: int,
+    settings: Optional[Settings] = None,
+) -> Tuple[int, int]:
+    """Upsert cached weather payload; returns (fetched_at, expires_at) unix timestamps."""
+    now = int(time.time())
+    expires = now + max(60, ttl_seconds)
+    blob = json.dumps(payload, ensure_ascii=False)
+    async with get_connection(settings) as db:
+        await db.execute(
+            """
+            INSERT INTO weather_cache (location_key, fetched_at, expires_at, payload)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(location_key) DO UPDATE SET
+              fetched_at = excluded.fetched_at,
+              expires_at = excluded.expires_at,
+              payload = excluded.payload
+            """,
+            (location_key, now, expires, blob),
+        )
+        await db.commit()
+    return (now, expires)
+
+
 # --- Supabase sync helpers ---
 
 
