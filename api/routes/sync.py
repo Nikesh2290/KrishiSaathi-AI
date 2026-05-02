@@ -57,7 +57,7 @@ async def get_sync_bundle(
 
 @router.post("/sync/push")
 async def push_to_supabase() -> Dict[str, Any]:
-    """Push unsynced SQLite farmer rows, query logs, and scheme vectors to Supabase."""
+    """Push unsynced SQLite farmer rows, conversation metadata, query logs, and scheme vectors to Supabase."""
     settings = get_settings()
     if not settings.supabase_db_configured:
         return {"ok": False, "skipped": True, "reason": "Supabase DB not configured"}

@@ -3,7 +3,7 @@
 Base URL (local): `http://localhost:8000`. OpenAPI UI: `/docs`.
 Backend version: `0.2.0`. Hackathon: Gemma 4 Good.
 
-Most endpoints return JSON. The offline bundle endpoint returns **gzipped JSON**. All errors use the unified envelope (Section 10).
+Most endpoints return JSON. The offline bundle endpoint returns **gzipped JSON**. All errors use the unified envelope (Section 12).
 
 ## Endpoints
 
@@ -17,6 +17,8 @@ Most endpoints return JSON. The offline bundle endpoint returns **gzipped JSON**
 | POST | `/api/v1/query/stream` | Streaming agent call (SSE) |
 | GET | `/api/v1/sync/bundle` | Offline bundle (district-scoped, gzip) |
 | POST | `/api/v1/sync/push` | Push unsynced local SQLite data to Supabase (optional) |
+| POST | `/api/v1/conversation` | Create a new chat session (`conversation_id` + metadata) |
+| GET | `/api/v1/farmer/{farmer_id}/conversations` | List all `conversation_id` values (sessions) for a farmer |
 | GET | `/api/v1/farmer/{farmer_id}/twin` | Read digital twin |
 | PUT | `/api/v1/farmer/{farmer_id}/twin` | Update twin |
 
@@ -98,13 +100,63 @@ Most endpoints return JSON. The offline bundle endpoint returns **gzipped JSON**
 }
 ```
 
-## 4. `POST /api/v1/query`
+## 4. `POST /api/v1/conversation`
+
+**Query params**
+
+- `connectivity` (string, optional): default `online`; use `offline` to write local SQLite only until sync.
+
+**Request body (JSON)**
+
+```json
+{
+  "farmer_id": "uuid-or-demo-id",
+  "title": "Optional session title"
+}
+```
+
+**Response 200**
+
+```json
+{
+  "conversation_id": "550e8400-e29b-41d4-a716-446655440000",
+  "farmer_id": "uuid-or-demo-id",
+  "title": "Optional session title",
+  "created_at": "2026-05-02T12:00:00.000000+00:00",
+  "updated_at": "2026-05-02T12:00:00.000000+00:00"
+}
+```
+
+## 5. `GET /api/v1/farmer/{farmer_id}/conversations`
+
+**Query params**
+
+- `connectivity` (string, optional): default `online` (prefer Supabase when configured; else SQLite).
+
+**Response 200**
+
+Array of session metadata objects (newest first by `created_at`):
+
+```json
+[
+  {
+    "conversation_id": "550e8400-e29b-41d4-a716-446655440000",
+    "farmer_id": "uuid-or-demo-id",
+    "title": "Optional session title",
+    "created_at": "2026-05-02T12:00:00.000000+00:00",
+    "updated_at": "2026-05-02T12:00:00.000000+00:00"
+  }
+]
+```
+
+## 6. `POST /api/v1/query`
 
 Request:
 
 ```json
 {
   "farmer_id": "f1",
+  "conversation_id": "550e8400-e29b-41d4-a716-446655440000",
   "query": {
     "text": "मेरी गेहूं की फसल पीली पड़ रही है",
     "image_ref": null,
@@ -127,10 +179,11 @@ Request:
 **Request fields**
 
 - `farmer_id` (string, required): stable farmer/user id (Supabase UUID if you use auth; otherwise any stable id for offline-only).
+- `conversation_id` (string, optional): thread id from `POST /api/v1/conversation`. When set with `farmer_id`, the server upserts `conversation_metadata` and attaches turns in `query_history` to this session.
 - `query` (object, optional): user input payload.
   - `query.text` (string): user text question (default `""`).
   - `query.voice_b64` (string|null): base64 audio (if you implement voice capture; may be ignored by some builds).
-  - `query.image_ref` (string|null): reference returned by `POST /api/v1/query/image` (Section 5).
+  - `query.image_ref` (string|null): reference returned by `POST /api/v1/query/image` (Section 7).
   - `query.language` (string): short language code (default `"hi"`).
 - `context` (object, optional): device + situation context.
   - `context.location` (object): any location keys (commonly `lat`, `lng`, `district`, `state`).
@@ -174,7 +227,7 @@ Response 200:
 - `language` (string): output language code.
 - `timestamp` (string): ISO timestamp (UTC).
 
-## 5. `POST /api/v1/query/image`
+## 7. `POST /api/v1/query/image`
 
 `multipart/form-data`:
 
@@ -207,7 +260,7 @@ Response 201:
 - `mime` (string): detected mime type (JPEG/PNG).
 - `bytes` (number): original byte size.
 
-## 6. `POST /api/v1/query/stream` (SSE)
+## 8. `POST /api/v1/query/stream` (SSE)
 
 **What it does / used for**
 
@@ -240,7 +293,7 @@ data: {"code":"STREAM_ERROR","message":"..."}
 
 ```
 
-## 7. `GET /api/v1/sync/bundle`
+## 9. `GET /api/v1/sync/bundle`
 
 Query params: `state` (required), `district` (required), `bundle_version` (optional).
 
@@ -273,12 +326,13 @@ Payload (after gunzip):
   - crop calendar (global)
   - weather history (district filtered)
 
-## 8. `POST /api/v1/sync/push`
+## 10. `POST /api/v1/sync/push`
 
 **What it does / used for**
 
 - Pushes unsynced local SQLite data to Supabase (if configured):
   - farmer twin rows
+  - conversation metadata rows
   - query history rows
   - scheme embeddings/vectors
 
@@ -300,16 +354,18 @@ If sync ran:
 {
   "ok": true,
   "farmer_twins_synced": 0,
+  "conversation_metadata_synced": 0,
   "query_rows_synced": 0,
   "scheme_chunks_synced": 0
 }
 ```
 
 - `farmer_twins_synced` (number): number of twin rows uploaded.
+- `conversation_metadata_synced` (number): number of conversation session rows uploaded.
 - `query_rows_synced` (number): number of query logs uploaded.
 - `scheme_chunks_synced` (number): number of scheme vector rows uploaded.
 
-## 9. Farmer twin
+## 11. Farmer twin
 
 Unchanged from v0.1:
 
@@ -329,12 +385,9 @@ Unchanged from v0.1:
     "lat": 30.65,
     "lng": 75.95
   },
-  "land": { "total_acres": 4.5, "soil_type": "loamy", "irrigation": "rainfed" },
+  "land": { "total_acres": 4.5, "soil_type": "loamy" },
   "current_crops": ["wheat"],
-  "financial": { "kcc_loan_amount": 75000, "kcc_bank": "SBI", "pm_fasal_bima": true },
-  "risk_profile": "moderate",
-  "preferred_language": "hi",
-  "interaction_history": []
+  "preferred_language": "hi"
 }
 ```
 
@@ -344,7 +397,7 @@ Notes:
 - `PUT /twin` supports query param `connectivity` (default `online`). Use `offline` to queue for later Supabase sync.
 - `PUT /twin` requires `body.farmer_id == path farmer_id` (otherwise 400).
 
-## 10. Error envelope
+## 12. Error envelope
 
 Every non-2xx response:
 
@@ -372,10 +425,10 @@ Every non-2xx response:
 | 503 | `UPSTREAM_UNAVAILABLE` | true | `USE_ONDEVICE` |
 | 500 | `INTERNAL_ERROR` | false | `RETRY_ONLINE_LATER` |
 
-## 11. Languages
+## 13. Languages
 
 Short ISO codes in `query.language`: `hi`, `en`, `pa`, `te`, `mr`, `bn`.
 
-## 12. Auth
+## 14. Auth
 
 Optional header `X-Farmer-Id` for future use. Current hackathon build relies on `farmer_id` in the body.

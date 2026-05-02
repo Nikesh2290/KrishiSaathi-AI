@@ -46,6 +46,9 @@ async def find_schemes(
     context = json.dumps(retrieved, ensure_ascii=False)[:8000]
     loc = farmer.location if farmer else None
     loc_s = f"{loc.state}/{loc.district}" if loc else "unknown"
+    name_s = (
+        (farmer.name.strip() if farmer and farmer.name else "") or "Farmer"
+    )
     messages = [
         {
             "role": "system",
@@ -53,7 +56,10 @@ async def find_schemes(
         },
         {
             "role": "user",
-            "content": f"Farmer region: {loc_s}. Question: {query}\n\nSchemes data:\n{context}",
+            "content": (
+                f"Farmer name: {name_s}. Region: {loc_s}. Question: {query}\n\n"
+                f"Schemes data:\n{context}"
+            ),
         },
     ]
     text = await generate(messages, prefer_local=prefer_local, settings=settings)

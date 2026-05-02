@@ -18,7 +18,7 @@ _DATA = Path(__file__).resolve().parent / "data"
 
 
 class SupabaseSync:
-    """Idempotent-ish sync job: farmer twin rows → query_history → scheme_vectors."""
+    """Idempotent-ish sync job: farmer twin rows → conversation_metadata → query_history → scheme_vectors."""
 
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
@@ -37,6 +37,28 @@ class SupabaseSync:
                 logger.warning("sync farmer %s: %s", farmer_id, e)
         return n
 
+    async def sync_conversation_metadata(self) -> int:
+        if not self.settings.supabase_db_configured:
+            return 0
+        rows = await sqlite_client.fetch_unsynced_conversation_metadata(self.settings)
+        n = 0
+        for row in rows:
+            cid = str(row["conversation_id"])
+            try:
+                await supabase_client.upsert_conversation_metadata_remote(
+                    cid,
+                    str(row["farmer_id"]),
+                    row.get("title"),
+                    created_at_unix=int(row["created_at"]),
+                    updated_at_unix=int(row["updated_at"]),
+                    settings=self.settings,
+                )
+                await sqlite_client.mark_conversation_metadata_synced(cid, self.settings)
+                n += 1
+            except Exception as e:
+                logger.warning("sync conversation_metadata id=%s: %s", cid, e)
+        return n
+
     async def sync_query_history(self) -> int:
         if not self.settings.supabase_db_configured:
             return 0
@@ -45,7 +67,6 @@ class SupabaseSync:
         for row in rows:
             try:
                 await supabase_client.insert_query_history_remote(
-                    str(row["farmer_id"]),
                     row["query_text"] or "",
                     row["intent"] or "",
                     row["response"] or "",
@@ -98,11 +119,13 @@ class SupabaseSync:
         if not self.settings.supabase_db_configured:
             return {"ok": False, "skipped": True, "reason": "Supabase DB not configured"}
         farmers = await self.sync_farmer_twins()
+        conversations = await self.sync_conversation_metadata()
         queries = await self.sync_query_history()
         vectors = await self.sync_scheme_vectors()
         return {
             "ok": True,
             "farmer_twins_synced": farmers,
+            "conversation_metadata_synced": conversations,
             "query_rows_synced": queries,
             "scheme_chunks_synced": vectors,
         }

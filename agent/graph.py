@@ -74,7 +74,9 @@ If a vision tool returned is_agricultural=false: briefly describe what the image
 CHAT HISTORY (when present in the JSON payload): previous turns; assistant replies may be truncated to 250 chars.
 Use only to understand what the current question refers to. Never re-answer old questions unless the user asks again.
 If details appear cut off, answer what is clear and invite a follow-up.
-If chat_history is empty or absent, ignore this section entirely."""
+If chat_history is empty or absent, ignore this section entirely.
+
+When farmer_profile is present in the JSON payload, use the farmer's name naturally when addressing them (respectfully); if name is missing or empty, use neutral address."""
 
 # ------------------------------ state ------------------------------
 
@@ -94,6 +96,18 @@ class AgentState(TypedDict, total=False):
     confidence_score: float
     model_used: str
     fallback_hint: Optional[str]
+
+
+def _farmer_profile_for_llm(twin: Optional[FarmerTwin]) -> Optional[Dict[str, Any]]:
+    if not twin:
+        return None
+    return {
+        "name": twin.name,
+        "location": twin.location.model_dump(),
+        "land": twin.land.model_dump(),
+        "current_crops": twin.current_crops,
+        "preferred_language": twin.preferred_language,
+    }
 
 
 # --------------------------- planner bits ---------------------------
@@ -134,7 +148,7 @@ Allowed TOOL_NAME values and params:
 Rules:
 - Prefer at most 3 tools in the tools array. Fewer is better when one tool suffices.
 - If query.image_ref is present and user may be asking about the photo → include vision first with use_image true.
-- Use farmer_profile (soil, state, crops) from input only to disambiguate — do not invent facts.
+- Use farmer_profile (name, location, land, crops, preferred_language) from input only to disambiguate — do not invent facts.
 
 WHEN TO USE clarify instead of tools:
 - Query is too vague or one word with no clear farming intent ("help", "kuch batao", "problem", "potato" alone).
@@ -206,7 +220,7 @@ async def _load_chat_history(req: AgentRequest, settings: Settings) -> List[Dict
     if not cid:
         return []
     try:
-        turns = await get_last_n_turns(req.farmer_id, cid, n=3, settings=settings)
+        turns = await get_last_n_turns(cid, n=3, settings=settings)
         return build_chat_history_context(turns)
     except Exception as e:
         logger.warning("chat history load failed: %s", e)
@@ -221,15 +235,7 @@ async def _plan_with_llm(
     chat_history: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     twin = await resolve_farmer_twin(req.farmer_id, req.context.connectivity, settings)
-    twin_payload: Optional[Dict[str, Any]] = None
-    if twin:
-        twin_payload = {
-            "location": twin.location.model_dump(),
-            "land": twin.land.model_dump(),
-            "current_crops": twin.current_crops,
-            "risk_profile": twin.risk_profile,
-            "preferred_language": twin.preferred_language,
-        }
+    twin_payload = _farmer_profile_for_llm(twin)
     hist = chat_history if chat_history is not None else []
     user = json.dumps(
         {
@@ -344,7 +350,7 @@ async def _dispatch_one(
                 req.context.location.get("state") or "Punjab"
             )
             season = params.get("season") or "rabi"
-            water = twin.land.irrigation if twin else "tube_well"
+            water = "tube_well"
             return await _with_timeout(
                 crop_planner.recommend_async(
                     soil, state, season, water, ctx.prefer_local, settings
@@ -376,12 +382,14 @@ async def _dispatch_one(
                 str(req.context.location.get("state") or "") or "India"
             )
             crops = twin.current_crops if twin else []
+            name_s = (twin.name.strip() if twin and twin.name else "") or "Farmer"
             q = params.get("query") or req.query.text or ""
             msgs = [
                 {
                     "role": "system",
                     "content": (
                         f"You are an expert agronomist for Indian farmers in {st}. "
+                        f"Address the farmer respectfully by name when natural: {name_s}. "
                         f"This farmer has {soil} soil and is currently growing: "
                         f"{crops or 'not specified'}. "
                         "Answer completely and accurately in the farmer's language "
@@ -496,8 +504,11 @@ async def node_tools(state: AgentState) -> Dict[str, Any]:
 async def node_synthesize(state: AgentState) -> Dict[str, Any]:
     settings = get_settings()
     req = state["request"]
+    twin = await resolve_farmer_twin(req.farmer_id, req.context.connectivity, settings)
+    farmer_profile = _farmer_profile_for_llm(twin)
     payload = json.dumps(
         {
+            "farmer_profile": farmer_profile,
             "tools": state.get("tool_results"),
             "user_query": req.query.text,
             "chat_history": state.get("chat_history") or [],
@@ -555,10 +566,15 @@ async def node_safety(state: AgentState) -> Dict[str, Any]:
         and should_escalate(score, settings.confidence_threshold_low)
         and not state.get("_escalated")  # type: ignore[typeddict-item]
     ):
+        rq_esc = state["request"]
+        twin_esc = await resolve_farmer_twin(
+            rq_esc.farmer_id, rq_esc.context.connectivity, settings
+        )
         payload = json.dumps(
             {
+                "farmer_profile": _farmer_profile_for_llm(twin_esc),
                 "tools": tool_results,
-                "user_query": state["request"].query.text,
+                "user_query": rq_esc.query.text,
                 "chat_history": state.get("chat_history") or [],
             },
             ensure_ascii=False,
@@ -703,12 +719,12 @@ async def run_graph_stream(
         resp.conversation_id = rq.conversation_id
         try:
             await persist_log_query(
-                rq.farmer_id,
                 rq.query.text,
                 resp.structured.kind,
                 resp.text[:2000],
                 resp.data_source,
                 rq.context.connectivity,
+                farmer_id=rq.farmer_id,
                 conversation_id=rq.conversation_id,
                 settings=settings,
             )
@@ -725,8 +741,10 @@ async def run_graph_stream(
 
     yield ("data-stage", {"data": {"stage": "synthesizing"}})
     rq = req
+    twin_syn = await resolve_farmer_twin(rq.farmer_id, rq.context.connectivity, settings)
     payload = json.dumps(
         {
+            "farmer_profile": _farmer_profile_for_llm(twin_syn),
             "tools": state.get("tool_results"),
             "user_query": rq.query.text,
             "chat_history": state.get("chat_history") or [],
@@ -785,12 +803,12 @@ async def run_graph_stream(
     resp.conversation_id = rq.conversation_id
     try:
         await persist_log_query(
-            rq.farmer_id,
             rq.query.text,
             resp.structured.kind,
             resp.text[:2000],
             resp.data_source,
             rq.context.connectivity,
+            farmer_id=rq.farmer_id,
             conversation_id=rq.conversation_id,
             settings=settings,
         )

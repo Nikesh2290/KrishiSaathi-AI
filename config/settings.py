@@ -44,13 +44,13 @@ class Settings(BaseSettings):
     connectivity_mode: str = Field(default="auto", alias="CONNECTIVITY_MODE")
 
     # Supabase (Auth + Postgres + pgvector). Anon key is used for email/password auth;
-    # service role is required for server-side DB/RPC (bypasses RLS).
+    # service role is used for server-side DB/RPC (elevated access when RLS is enabled).
     supabase_url: str = Field(default="", alias="SUPABASE_URL")
     supabase_anon_key: str = Field(default="", alias="SUPABASE_ANON_KEY")
     supabase_service_role_key: str = Field(
         default="",
         alias="SUPABASE_SERVICE_ROLE_KEY",
-        description="Server-only key for farmer_twin, query_history, scheme_vectors sync/search.",
+        description="Server-only key for farmer_twin, conversation_metadata, query_history, scheme_vectors sync/search.",
     )
 
     database_path: str = Field(default="./data/krishisaathi.db", alias="DATABASE_PATH")
