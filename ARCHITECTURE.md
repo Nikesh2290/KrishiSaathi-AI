@@ -337,18 +337,10 @@ Stored on-device (SQLite); synced to cloud when online.
   },
   "land": {
     "total_acres": 4.5,
-    "soil_type": "loamy",
-    "irrigation": "tube_well"
+    "soil_type": "loamy"
   },
   "current_crops": ["wheat", "mustard"],
-  "financial": {
-    "kcc_loan_amount": 75000,
-    "kcc_bank": "SBI",
-    "pm_fasal_bima": true
-  },
-  "risk_profile": "moderate",
-  "preferred_language": "hi",
-  "interaction_history": []
+  "preferred_language": "hi"
 }
 ```
 

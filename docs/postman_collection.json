@@ -46,7 +46,7 @@
         "header": [{ "key": "Content-Type", "value": "application/json" }],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"farmer_id\": \"demo-farmer-1\",\n  \"name\": \"Ramesh Kumar\",\n  \"location\": { \"state\": \"Punjab\", \"district\": \"Ludhiana\", \"village\": \"Raikot\", \"lat\": 30.65, \"lng\": 75.95 },\n  \"land\": { \"total_acres\": 4.5, \"soil_type\": \"loamy\", \"irrigation\": \"tube_well\" },\n  \"current_crops\": [\"wheat\", \"mustard\"],\n  \"financial\": { \"kcc_loan_amount\": 75000, \"kcc_bank\": \"SBI\", \"pm_fasal_bima\": true },\n  \"risk_profile\": \"moderate\",\n  \"preferred_language\": \"hi\",\n  \"interaction_history\": []\n}"
+          "raw": "{\n  \"farmer_id\": \"demo-farmer-1\",\n  \"name\": \"Ramesh Kumar\",\n  \"location\": { \"state\": \"Punjab\", \"district\": \"Ludhiana\", \"village\": \"Raikot\", \"lat\": 30.65, \"lng\": 75.95 },\n  \"land\": { \"total_acres\": 4.5, \"soil_type\": \"loamy\" },\n  \"current_crops\": [\"wheat\", \"mustard\"],\n  \"preferred_language\": \"hi\"\n}"
         },
         "url": "{{baseUrl}}/api/v1/farmer/demo-farmer-1/twin"
       }

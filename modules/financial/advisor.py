@@ -28,7 +28,6 @@ def advise_sync(twin: FarmerTwin, season: str = "rabi") -> Dict[str, Any]:
         "kcc_suggested_limit_inr": kcc,
         "pmfb_sum_insured_inr": round(sum_insured, 2),
         "pmfb_estimated_premium_inr": prem,
-        "pmfb_enrolled": twin.financial.pm_fasal_bima,
         "numbers_source": "rule_engine",
     }
 
@@ -41,10 +40,14 @@ async def advise(
 ) -> Dict[str, Any]:
     settings = settings or get_settings()
     numbers = advise_sync(twin, season=season)
+    name_s = (twin.name.strip() if twin.name else "") or "the farmer"
     msgs = [
         {
             "role": "system",
-            "content": "Explain these financial numbers to a farmer in simple Hindi or English. Do NOT invent new numbers; only narrate what is given.",
+            "content": (
+                f"Explain these financial numbers to {name_s} in simple Hindi or English. "
+                "Do NOT invent new numbers; only narrate what is given."
+            ),
         },
         {"role": "user", "content": json.dumps(numbers, ensure_ascii=False)},
     ]
