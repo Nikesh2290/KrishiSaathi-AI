@@ -70,6 +70,16 @@ CREATE TABLE IF NOT EXISTS auth_state (
     refresh_token TEXT,
     expires_at INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS pending_deletes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_type TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    farmer_id TEXT NOT NULL,
+    queued_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS pending_deletes_type_idx ON pending_deletes(entity_type);
 """
 
 
@@ -114,6 +124,24 @@ async def _migrate_existing_db(db: aiosqlite.Connection) -> None:
         await db.execute(
             "ALTER TABLE conversation_metadata ADD COLUMN synced INTEGER NOT NULL DEFAULT 0"
         )
+
+    cur = await db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='pending_deletes'"
+    )
+    if not await cur.fetchone():
+        await db.executescript(
+            """
+            CREATE TABLE pending_deletes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                farmer_id TEXT NOT NULL,
+                queued_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS pending_deletes_type_idx ON pending_deletes(entity_type);
+            """
+        )
+
 
 
 async def init_db(settings: Optional[Settings] = None) -> None:
@@ -242,6 +270,76 @@ async def get_conversations_by_farmer(
         )
         rows = await cur.fetchall()
     return [dict(r) for r in rows]
+
+
+async def delete_conversation_local(
+    conversation_id: str, settings: Optional[Settings] = None
+) -> None:
+    """Remove all query_history turns and conversation_metadata for one session."""
+    cid = (conversation_id or "").strip()
+    if not cid:
+        return
+    async with get_connection(settings) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            await db.execute("DELETE FROM query_history WHERE conversation_id = ?", (cid,))
+            await db.execute(
+                "DELETE FROM conversation_metadata WHERE conversation_id = ?", (cid,)
+            )
+        except Exception:
+            await db.rollback()
+            raise
+        await db.commit()
+
+
+async def queue_pending_delete(
+    entity_type: str,
+    entity_id: str,
+    farmer_id: str,
+    settings: Optional[Settings] = None,
+) -> None:
+    """Record a deletion to propagate to Supabase when back online."""
+    now = int(time.time())
+    eid = (entity_id or "").strip()
+    if not eid or not (entity_type or "").strip():
+        return
+    async with get_connection(settings) as db:
+        await db.execute(
+            """
+            INSERT INTO pending_deletes (entity_type, entity_id, farmer_id, queued_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (entity_type.strip(), eid, farmer_id, now),
+        )
+        await db.commit()
+
+
+async def fetch_pending_deletes(
+    entity_type: str, settings: Optional[Settings] = None
+) -> List[Dict[str, Any]]:
+    et = (entity_type or "").strip()
+    if not et:
+        return []
+    async with get_connection(settings) as db:
+        cur = await db.execute(
+            """
+            SELECT id, entity_type, entity_id, farmer_id, queued_at
+            FROM pending_deletes
+            WHERE entity_type = ?
+            ORDER BY queued_at ASC, id ASC
+            """,
+            (et,),
+        )
+        rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def remove_pending_delete(
+    row_id: int, settings: Optional[Settings] = None
+) -> None:
+    async with get_connection(settings) as db:
+        await db.execute("DELETE FROM pending_deletes WHERE id = ?", (row_id,))
+        await db.commit()
 
 
 async def log_query(

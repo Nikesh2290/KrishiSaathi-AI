@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from config.settings import get_settings
 from db.persistence import (
+    delete_conversation as delete_conversation_persisted,
     persist_conversation_metadata,
     resolve_conversation_history,
     resolve_conversations_by_farmer,
@@ -114,3 +115,30 @@ async def get_conversation_history(
     meta = _serialize_conversation_row(dict(bundle["meta"]))
     messages = [_serialize_history_message(dict(m)) for m in bundle["messages"]]
     return {**meta, "messages": messages}
+
+
+@router.delete("/farmer/{farmer_id}/conversations/{conversation_id}")
+async def delete_conversation(
+    farmer_id: str,
+    conversation_id: str,
+    connectivity: str = Query(
+        "online",
+        description="offline = delete locally only and queue removal for Supabase sync",
+    ),
+) -> Dict[str, Any]:
+    ok = await delete_conversation_persisted(
+        farmer_id,
+        conversation_id,
+        connectivity,
+        get_settings(),
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=404,
+            detail="conversation not found or access denied",
+        )
+    return {
+        "deleted": True,
+        "conversation_id": conversation_id.strip(),
+        "farmer_id": farmer_id,
+    }

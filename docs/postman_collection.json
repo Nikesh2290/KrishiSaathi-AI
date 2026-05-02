@@ -32,6 +32,20 @@
       }
     },
     {
+      "name": "Conversation history",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/api/v1/farmer/demo-farmer-1/conversations/REPLACE_WITH_CONVERSATION_ID/history?connectivity=online"
+      }
+    },
+    {
+      "name": "Delete conversation",
+      "request": {
+        "method": "DELETE",
+        "url": "{{baseUrl}}/api/v1/farmer/demo-farmer-1/conversations/REPLACE_WITH_CONVERSATION_ID?connectivity=online"
+      }
+    },
+    {
       "name": "Query",
       "request": {
         "method": "POST",

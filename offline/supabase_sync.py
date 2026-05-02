@@ -23,6 +23,33 @@ class SupabaseSync:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
 
+    async def drain_pending_deletes(self) -> int:
+        if not self.settings.supabase_db_configured:
+            return 0
+        rows = await sqlite_client.fetch_pending_deletes("conversation", self.settings)
+        n = 0
+        for row in rows:
+            row_id = int(row["id"])
+            cid = str(row["entity_id"])
+            queued_farmer = str(row.get("farmer_id") or "")
+            try:
+                meta = await supabase_client.get_conversation_metadata_remote(
+                    cid, self.settings
+                )
+                if meta is not None and str(meta.get("farmer_id") or "") != queued_farmer:
+                    logger.warning(
+                        "dropping pending delete id=%s: farmer_id mismatch for conversation",
+                        row_id,
+                    )
+                    await sqlite_client.remove_pending_delete(row_id, self.settings)
+                    continue
+                await supabase_client.delete_conversation_remote(cid, self.settings)
+                await sqlite_client.remove_pending_delete(row_id, self.settings)
+                n += 1
+            except Exception as e:
+                logger.warning("drain pending delete id=%s: %s", row.get("id"), e)
+        return n
+
     async def sync_farmer_twins(self) -> int:
         if not self.settings.supabase_db_configured:
             return 0
@@ -118,12 +145,14 @@ class SupabaseSync:
     async def run(self) -> Dict[str, Any]:
         if not self.settings.supabase_db_configured:
             return {"ok": False, "skipped": True, "reason": "Supabase DB not configured"}
+        pending_deleted = await self.drain_pending_deletes()
         farmers = await self.sync_farmer_twins()
         conversations = await self.sync_conversation_metadata()
         queries = await self.sync_query_history()
         vectors = await self.sync_scheme_vectors()
         return {
             "ok": True,
+            "conversation_deletes_drained": pending_deleted,
             "farmer_twins_synced": farmers,
             "conversation_metadata_synced": conversations,
             "query_rows_synced": queries,
