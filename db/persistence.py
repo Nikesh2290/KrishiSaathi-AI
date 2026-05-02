@@ -8,8 +8,10 @@ from typing import Any, Dict, List, Optional
 from config.settings import Settings, get_settings
 from db import supabase_client
 from db.sqlite_client import (
+    get_conversation_metadata,
     get_conversations_by_farmer,
     get_farmer_twin,
+    get_query_history_for_conversation,
     log_query,
     upsert_conversation_metadata,
     upsert_farmer_twin,
@@ -109,6 +111,46 @@ async def resolve_conversations_by_farmer(
     except Exception as e:
         logger.warning("Remote conversation list failed, using local cache: %s", e)
     return await get_conversations_by_farmer(farmer_id, settings)
+
+
+async def resolve_conversation_history(
+    farmer_id: str,
+    conversation_id: str,
+    connectivity: str,
+    settings: Optional[Settings] = None,
+) -> Optional[Dict[str, Any]]:
+    """Session metadata plus query/response turns when the thread exists and belongs to farmer_id."""
+    settings = settings or get_settings()
+    cid = (conversation_id or "").strip()
+    if not cid:
+        return None
+
+    offline = is_offline_context(connectivity) or not settings.supabase_db_configured
+
+    if not offline:
+        try:
+            meta = await supabase_client.get_conversation_metadata_remote(cid, settings)
+            if meta is not None and str(meta.get("farmer_id")) == str(farmer_id):
+                try:
+                    messages = await supabase_client.get_query_history_by_conversation_remote(
+                        cid, settings
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Remote query history failed, using local cache: %s", e
+                    )
+                    messages = await get_query_history_for_conversation(cid, settings)
+                return {"meta": meta, "messages": messages}
+            if meta is not None:
+                return None
+        except Exception as e:
+            logger.warning("Remote conversation history path failed, using local: %s", e)
+
+    meta = await get_conversation_metadata(cid, settings)
+    if not meta or str(meta.get("farmer_id")) != str(farmer_id):
+        return None
+    messages = await get_query_history_for_conversation(cid, settings)
+    return {"meta": meta, "messages": messages}
 
 
 async def persist_log_query(
