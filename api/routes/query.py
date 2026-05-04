@@ -27,6 +27,43 @@ _ALLOWED_MIME = {"image/jpeg", "image/png"}
 
 _DEVANAGARI_RE = re.compile(r"[\u0900-\u097F]")
 
+_HINGLISH_SIGNALS = frozenset({
+    "shukriya",
+    "dhanyawad",
+    "theek",
+    "haan",
+    "haanji",
+    "han",
+    "achha",
+    "acha",
+    "ji",
+    "namaste",
+    "namaskar",
+    "kal",
+    "abhi",
+    "kk",
+    "thx",
+    "alvida",
+    "milenge",
+    "phir",
+    "ratri",
+    "shubh",
+    "hai",
+    "hain",
+})
+
+
+def _is_hindi_or_hinglish(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    if _DEVANAGARI_RE.search(t):
+        return True
+    lower = t.lower()
+    words = set(re.sub(r"[^\w\s]", " ", lower).split())
+    return bool(words & _HINGLISH_SIGNALS)
+
+
 _SMALLTALK_GREETING_RE = re.compile(
     r"^\s*(?:hi+|hello+|hey+|hlo+|yo+|namaste|namaskar|नमस्ते|नमस्कार)\s*[!.]*\s*$",
     re.IGNORECASE,
@@ -58,7 +95,7 @@ def _smalltalk_reply(text: str) -> tuple[str, str] | None:
     if not t:
         return None
 
-    is_hi = bool(_DEVANAGARI_RE.search(t))
+    is_hi = _is_hindi_or_hinglish(t)
 
     def hi(en: str, hi_msg: str) -> str:
         return hi_msg if is_hi else en

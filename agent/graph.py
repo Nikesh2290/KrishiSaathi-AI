@@ -55,6 +55,21 @@ _ALLOWED_PLANNER_TOOLS = frozenset(
     }
 )
 
+_LANGUAGE_RULE = (
+    "LANGUAGE RULE (MANDATORY — follow before anything else): "
+    "Read the user's message text. Identify the language they used: "
+    "Hindi (Devanagari script), Hinglish (Hindi written in Roman/Latin script), or English. "
+    "Write your ENTIRE response in that SAME language. "
+    "If they wrote in Devanagari Hindi → reply in Devanagari Hindi. "
+    "If they wrote in Hinglish (Roman-script Hindi) → reply in Hinglish. "
+    "If they wrote in English → reply in English. "
+    "Never switch languages mid-response. Technical terms (NPK, pH, KCC) may appear as-is."
+)
+
+
+def _system_with_language_rule(base_prompt: str) -> str:
+    return f"{_LANGUAGE_RULE}\n\n{base_prompt}"
+
 
 _SYNTHESIS_SYSTEM_PROMPT = """You are KrishiSaathi, a smart and helpful assistant for Indian farmers.
 
@@ -68,7 +83,6 @@ Your job:
 - If a tool result is NOT relevant to what the user asked, ignore it entirely (do not mention unrelated tools).
 - If a general_qa tool result is present with an "answer" field, treat that as the core answer — keep it as-is unless other tools clearly add useful facts for this query.
 - Never lead with unrelated suggestions or alternatives before answering what was asked.
-- Match the farmer's language (Hindi/Hinglish if their query is in Hindi).
 
 If a vision tool returned is_agricultural=false: briefly describe what the image shows using the description field, then politely explain your specialization (crop disease, soil, schemes, weather, farm advice) using specialization_note—do not pretend it is a crop disease.
 
@@ -89,8 +103,7 @@ Rules:
 - Keep reply to 1-2 short sentences.
 - End with ONE gentle open question inviting their real farming need
   (e.g. "Aaj kaise madad kar sakta hoon?" / "How can I help you today?").
-- Never invent or assume farming details.
-- Match the farmer's language (Hindi/Hinglish/English) based on their message."""
+- Never invent or assume farming details."""
 
 # ------------------------------ state ------------------------------
 
@@ -283,7 +296,8 @@ async def _plan_with_llm(
         data = json.loads(raw)
         if isinstance(data, dict) and data.get("clarify") is True:
             q = str(data.get("question") or "").strip() or (
-                "कृपया अपना सवाल थोड़ा और स्पष्ट करें — आपको फसल, मौसम, योजना या बाज़ार में से किस बारे में जानकारी चाहिए?"
+                "कृपया अपना सवाल थोड़ा और स्पष्ट करें — आपको फसल, मौसम, योजना या बाज़ार में से किस बारे में जानकारी चाहिए? "
+                "/ Please clarify your question — do you need help with crop, weather, schemes, or market prices?"
             )
             return [{"tool": CLARIFY_TOOL, "params": {"question": q}}]
         if isinstance(data, dict) and data.get("smalltalk") is True:
@@ -413,13 +427,11 @@ async def _dispatch_one(
             msgs = [
                 {
                     "role": "system",
-                    "content": (
+                    "content": _system_with_language_rule(
                         f"You are an expert agronomist for Indian farmers in {st}. "
                         f"Address the farmer respectfully by name when natural: {name_s}. "
                         f"This farmer has {soil} soil and is currently growing: "
                         f"{crops or 'not specified'}. "
-                        "Answer completely and accurately in the farmer's language "
-                        "(Hindi/Hinglish if they wrote in Hindi). "
                         "Give the direct answer first, then practical tips."
                     ),
                 },
@@ -498,7 +510,7 @@ async def node_clarify(state: AgentState) -> Dict[str, Any]:
         plan[0]["params"].get("question")
         if plan and isinstance(plan[0].get("params"), dict)
         else None
-    ) or "कृपया अपना सवाल थोड़ा और स्पष्ट करें।"
+    ) or "कृपया अपना सवाल स्पष्ट करें। / Please clarify your question."
     settings = get_settings()
     prefer_local = bool(state.get("prefer_local"))
     model_used = state.get("model_used") or (
@@ -529,7 +541,10 @@ async def _build_smalltalk_llm_messages(state: AgentState) -> tuple[list[Dict[st
         ensure_ascii=False,
     )
     messages = [
-        {"role": "system", "content": _SMALLTALK_SYSTEM_PROMPT},
+        {
+            "role": "system",
+            "content": _system_with_language_rule(_SMALLTALK_SYSTEM_PROMPT),
+        },
         {"role": "user", "content": payload},
     ]
     model_used = settings.ollama_model if prefer_local else settings.ai_studio_model
@@ -584,7 +599,7 @@ async def node_synthesize(state: AgentState) -> Dict[str, Any]:
     messages = [
         {
             "role": "system",
-            "content": _SYNTHESIS_SYSTEM_PROMPT,
+            "content": _system_with_language_rule(_SYNTHESIS_SYSTEM_PROMPT),
         },
         {"role": "user", "content": payload},
     ]
@@ -648,7 +663,7 @@ async def node_safety(state: AgentState) -> Dict[str, Any]:
         messages = [
             {
                 "role": "system",
-                "content": (
+                "content": _system_with_language_rule(
                     "You are KrishiSaathi (heavy reasoning pass). Produce a precise, "
                     "cited, farmer-friendly answer."
                 ),
@@ -893,7 +908,7 @@ async def run_graph_stream(
     messages = [
         {
             "role": "system",
-            "content": _SYNTHESIS_SYSTEM_PROMPT,
+            "content": _system_with_language_rule(_SYNTHESIS_SYSTEM_PROMPT),
         },
         {"role": "user", "content": payload},
     ]
