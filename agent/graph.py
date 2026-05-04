@@ -42,6 +42,7 @@ from safety.layer import should_escalate
 logger = logging.getLogger(__name__)
 
 CLARIFY_TOOL = "__clarify__"
+SMALLTALK_TOOL = "__smalltalk__"
 _ALLOWED_PLANNER_TOOLS = frozenset(
     {
         "climate",
@@ -77,6 +78,19 @@ If details appear cut off, answer what is clear and invite a follow-up.
 If chat_history is empty or absent, ignore this section entirely.
 
 When farmer_profile is present in the JSON payload, use the farmer's name naturally when addressing them (respectfully); if name is missing or empty, use neutral address."""
+
+_SMALLTALK_SYSTEM_PROMPT = """You are KrishiSaathi, a warm and friendly AI companion for Indian farmers.
+The farmer has sent a greeting, thanks, or social message — not a farming question.
+
+Rules:
+- If farmer_profile.name is present and non-empty, use it once naturally and respectfully (e.g. "Namaste, Ramesh ji!").
+- If name is missing or empty, use a neutral warm address based on language:
+  Hindi/Hinglish: "Namaste!" | English: "Hello there!"
+- Keep reply to 1-2 short sentences.
+- End with ONE gentle open question inviting their real farming need
+  (e.g. "Aaj kaise madad kar sakta hoon?" / "How can I help you today?").
+- Never invent or assume farming details.
+- Match the farmer's language (Hindi/Hinglish/English) based on their message."""
 
 # ------------------------------ state ------------------------------
 
@@ -118,6 +132,7 @@ Use semantic understanding: users may write English, Hindi, Hinglish, or common 
 Return ONLY valid JSON (no markdown). Exactly ONE of these shapes:
 {"tools":[{"tool":"TOOL_NAME","params":{}}]}
 {"clarify": true, "question": "<one short clarifying question in the user's language>"}
+{"smalltalk": true}
 
 Allowed TOOL_NAME values and params:
 - general_qa — params: {"query": "<echo user question>"}
@@ -150,11 +165,20 @@ Rules:
 - If query.image_ref is present and user may be asking about the photo → include vision first with use_image true.
 - Use farmer_profile (name, location, land, crops, preferred_language) from input only to disambiguate — do not invent facts.
 
+WHEN TO USE smalltalk (before checking tools or clarify):
+- Pure greeting: "hi", "hello", "namaste", "hii", "helo", etc.
+- Pure thanks: "thanks", "thank you", "shukriya", "dhanyawad", etc.
+- Pure acknowledgement or leave-taking: "ok", "bye", "okay", "theek hai", "acha", "got it", etc.
+- Apology with no farming question: "sorry", "maafi", etc.
+- No farming intent whatsoever — ONLY a social or emotional message.
+Return {"smalltalk": true}. Do NOT use smalltalk if ANY farming topic is also present (e.g. "hi, what's wheat price?" → use market tool).
+
 WHEN TO USE clarify instead of tools:
 - Query is too vague or one word with no clear farming intent ("help", "kuch batao", "problem", "potato" alone).
 - Query is gibberish or too short to route confidently.
 - Two very different interpretations are equally likely and profile does not resolve them.
 Return {"clarify": true, "question": "..."} with ONE focused question.
+- Do NOT use clarify for pure greetings, thanks, or other social-only messages — use {"smalltalk": true} instead.
 
 WHEN NOT to clarify: if intent is reasonably clear, pick tools. Do not over-ask.
 
@@ -262,6 +286,8 @@ async def _plan_with_llm(
                 "कृपया अपना सवाल थोड़ा और स्पष्ट करें — आपको फसल, मौसम, योजना या बाज़ार में से किस बारे में जानकारी चाहिए?"
             )
             return [{"tool": CLARIFY_TOOL, "params": {"question": q}}]
+        if isinstance(data, dict) and data.get("smalltalk") is True:
+            return [{"tool": SMALLTALK_TOOL, "params": {}}]
         tools = data.get("tools") if isinstance(data, dict) else None
         normalized = _normalize_tool_plan(tools, settings)
         if normalized:
@@ -488,6 +514,46 @@ async def node_clarify(state: AgentState) -> Dict[str, Any]:
     }
 
 
+async def _build_smalltalk_llm_messages(state: AgentState) -> tuple[list[Dict[str, Any]], str]:
+    settings = get_settings()
+    req = state["request"]
+    prefer_local = bool(state.get("prefer_local"))
+    twin = await resolve_farmer_twin(req.farmer_id, req.context.connectivity, settings)
+    farmer_profile = _farmer_profile_for_llm(twin)
+    payload = json.dumps(
+        {
+            "farmer_profile": farmer_profile,
+            "user_message": req.query.text,
+            "chat_history": state.get("chat_history") or [],
+        },
+        ensure_ascii=False,
+    )
+    messages = [
+        {"role": "system", "content": _SMALLTALK_SYSTEM_PROMPT},
+        {"role": "user", "content": payload},
+    ]
+    model_used = settings.ollama_model if prefer_local else settings.ai_studio_model
+    return messages, model_used
+
+
+async def node_smalltalk(state: AgentState) -> Dict[str, Any]:
+    settings = get_settings()
+    prefer_local = bool(state.get("prefer_local"))
+    messages, model_used = await _build_smalltalk_llm_messages(state)
+    try:
+        draft = await generate(messages, prefer_local=prefer_local, settings=settings)
+    except Exception:
+        draft = "Namaste! Aaj main aapki kya madad kar sakta hoon?"
+    return {
+        "draft_text": draft,
+        "tool_results": {},
+        "tool_trace": ["smalltalk"],
+        "safety_flags": [],
+        "confidence_score": 1.0,
+        "model_used": model_used,
+    }
+
+
 async def node_tools(state: AgentState) -> Dict[str, Any]:
     settings = get_settings()
     req = state["request"]
@@ -620,6 +686,8 @@ def _route_after_plan(state: AgentState) -> str:
     plan = state.get("tool_plan") or []
     if plan and plan[0].get("tool") == CLARIFY_TOOL:
         return "clarify"
+    if plan and plan[0].get("tool") == SMALLTALK_TOOL:
+        return "smalltalk"
     return "tools"
 
 
@@ -628,6 +696,7 @@ def build_graph():
     g.add_node("route", node_route)
     g.add_node("plan", node_plan)
     g.add_node("clarify", node_clarify)
+    g.add_node("smalltalk", node_smalltalk)
     g.add_node("tools", node_tools)
     g.add_node("synthesize", node_synthesize)
     g.add_node("safety", node_safety)
@@ -637,9 +706,10 @@ def build_graph():
     g.add_conditional_edges(
         "plan",
         _route_after_plan,
-        {"clarify": "clarify", "tools": "tools"},
+        {"clarify": "clarify", "smalltalk": "smalltalk", "tools": "tools"},
     )
     g.add_edge("clarify", "respond")
+    g.add_edge("smalltalk", "safety")
     g.add_edge("tools", "synthesize")
     g.add_edge("synthesize", "safety")
     g.add_edge("safety", "respond")
@@ -732,6 +802,75 @@ async def run_graph_stream(
             logger.warning("log_query failed: %s", e)
 
         yield ("data-metadata", _agent_response_metadata(resp))
+        yield ("finish", {})
+        yield ("__done__", None)
+        return
+
+    if plan_early and plan_early[0].get("tool") == SMALLTALK_TOOL:
+        yield ("data-stage", {"data": {"stage": "smalltalk"}})
+        messages_st, model_used_st = await _build_smalltalk_llm_messages(state)
+        prefer_local_st = bool(state.get("prefer_local"))
+
+        yield ("start-step", {})
+        yield ("text-start", {"id": text_id})
+
+        draft_acc_st = ""
+        smalltalk_fb = (
+            "Namaste! Aaj main aapki kya madad kar sakta hoon?"
+        )
+        try:
+            async for chunk in generate_stream(
+                messages_st,
+                prefer_local=prefer_local_st,
+                settings=settings,
+            ):
+                draft_acc_st += chunk
+                yield ("text-delta", {"id": text_id, "delta": chunk})
+        except Exception as e:
+            logger.exception("Streaming smalltalk failed: %s", e)
+            draft_acc_st = smalltalk_fb
+            yield ("text-delta", {"id": text_id, "delta": smalltalk_fb})
+
+        yield ("text-end", {"id": text_id})
+        yield ("finish-step", {})
+
+        state["draft_text"] = draft_acc_st
+        state["model_used"] = model_used_st
+        state["tool_results"] = {}
+        state["tool_trace"] = ["smalltalk"]
+        state["safety_flags"] = []
+
+        state.update(await node_safety(state))
+        state.update(await node_fallback_hint(state))
+
+        rq_st = req
+        resp_st = build(
+            draft_text=state.get("draft_text") or "",
+            tool_results={},
+            tool_trace=list(state.get("tool_trace") or []),
+            data_source=str(state.get("data_source") or "live"),
+            language=rq_st.query.language,
+            safety_flags=list(state.get("safety_flags") or []),
+            model_used=str(state.get("model_used") or settings.ai_studio_model),
+            confidence_score=float(state.get("confidence_score") or 1.0),
+            fallback_hint=state.get("fallback_hint"),  # type: ignore[arg-type]
+        )
+        resp_st.conversation_id = rq_st.conversation_id
+        try:
+            await persist_log_query(
+                rq_st.query.text,
+                resp_st.structured.kind,
+                resp_st.text[:2000],
+                resp_st.data_source,
+                rq_st.context.connectivity,
+                farmer_id=rq_st.farmer_id,
+                conversation_id=rq_st.conversation_id,
+                settings=settings,
+            )
+        except Exception as e:
+            logger.warning("log_query failed: %s", e)
+
+        yield ("data-metadata", _agent_response_metadata(resp_st))
         yield ("finish", {})
         yield ("__done__", None)
         return

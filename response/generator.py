@@ -9,6 +9,8 @@ from models.response import AgentResponse, ConfidenceLevel, FallbackHint, Struct
 
 
 def _intent_from_trace(trace: List[str]) -> str:
+    if "smalltalk" in trace:
+        return "smalltalk"
     if "clarify" in trace:
         return "clarify"
     if "vision" in trace:
