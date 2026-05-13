@@ -338,7 +338,7 @@ def _dispatch_timeout(settings: Settings, name: str, ctx: _DispatchContext) -> f
     if name in ("scheme", "crop_planner", "financial", "general_qa"):
         return float(settings.llm_tool_timeout_seconds)
     if name == "market":
-        return float(settings.io_tool_timeout_seconds)
+        return float(settings.market_tool_timeout_seconds)
     return float(settings.tool_timeout_seconds)
 
 
@@ -411,8 +411,11 @@ async def _dispatch_one(
                 twin.location.district if twin else
                 (req.context.location.get("district") or "Ludhiana")
             )
+            st = twin.location.state if twin else (
+                req.context.location.get("state") or "Punjab"
+            )
             return await _with_timeout(
-                asyncio.to_thread(market_engine.get_prices, crop, str(dist)),
+                market_engine.get_prices(crop, str(dist), settings, state=str(st)),
                 timeout,
             )
 
