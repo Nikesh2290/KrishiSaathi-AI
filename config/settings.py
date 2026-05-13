@@ -93,6 +93,19 @@ class Settings(BaseSettings):
         description="Cap for fast local I/O (offline climate JSON, mandi CSV in thread).",
     )
 
+    # data.gov.in — mandi (OGD) API for sync + market tool fallback
+    ogd_api_key: str = Field(default="", alias="OGD_API_KEY")
+    mandi_price_ttl_seconds: int = Field(
+        default=86400,
+        alias="MANDI_PRICE_TTL_SECONDS",
+        description="How long synced mandi prices stay valid in local DB (default 24 h).",
+    )
+    market_tool_timeout_seconds: float = Field(
+        default=60.0,
+        alias="MARKET_TOOL_TIMEOUT_SECONDS",
+        description="Read/connect budget for mandi OGD HTTP (sync + tool fallback).",
+    )
+
     # Logging
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     log_json: bool = Field(default=True, alias="LOG_JSON")

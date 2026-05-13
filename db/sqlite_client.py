@@ -29,14 +29,26 @@ CREATE TABLE IF NOT EXISTS weather_cache (
     payload TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS price_cache (
+CREATE TABLE IF NOT EXISTS mandi_prices (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    crop TEXT NOT NULL,
-    mandi TEXT NOT NULL,
+    state TEXT NOT NULL,
+    district TEXT NOT NULL,
+    market TEXT NOT NULL,
+    commodity TEXT NOT NULL,
+    variety TEXT NOT NULL DEFAULT '',
+    min_price REAL,
+    max_price REAL,
+    modal_price REAL NOT NULL,
+    price_date TEXT NOT NULL,
     fetched_at INTEGER NOT NULL,
-    price_inr REAL NOT NULL,
-    unit TEXT NOT NULL
+    expires_at INTEGER NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_mandi_commodity_district
+    ON mandi_prices(commodity, district, expires_at);
+
+CREATE INDEX IF NOT EXISTS idx_mandi_state_district
+    ON mandi_prices(state, district);
 
 CREATE TABLE IF NOT EXISTS conversation_metadata (
     conversation_id TEXT PRIMARY KEY,
@@ -142,6 +154,11 @@ async def _migrate_existing_db(db: aiosqlite.Connection) -> None:
             """
         )
 
+    cur = await db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='price_cache'"
+    )
+    if await cur.fetchone():
+        await db.execute("DROP TABLE IF EXISTS price_cache")
 
 
 async def init_db(settings: Optional[Settings] = None) -> None:
@@ -473,6 +490,160 @@ async def set_weather_cache(
         )
         await db.commit()
     return (now, expires)
+
+
+# --- Mandi prices (local SQLite, OGD-backed) ---
+
+
+async def get_mandi_prices(
+    commodity: str,
+    district: str,
+    settings: Optional[Settings] = None,
+) -> List[Dict[str, Any]]:
+    """Rows for commodity + district that are not expired, newest price_date first."""
+    now = int(time.time())
+    c = (commodity or "").strip()
+    d = (district or "").strip()
+    if not c or not d:
+        return []
+    async with get_connection(settings) as db:
+        cur = await db.execute(
+            """
+            SELECT id, state, district, market, commodity, variety,
+                   min_price, max_price, modal_price, price_date, fetched_at, expires_at
+            FROM mandi_prices
+            WHERE lower(commodity) = lower(?) AND lower(district) = lower(?)
+              AND expires_at > ?
+            ORDER BY price_date DESC, id DESC
+            """,
+            (c, d, now),
+        )
+        rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def get_mandi_prices_for_location(
+    state: str,
+    district: str,
+    settings: Optional[Settings] = None,
+    *,
+    commodity: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Rows for state + district (optionally commodity) that are not expired."""
+    now = int(time.time())
+    st = (state or "").strip()
+    dist = (district or "").strip()
+    comm = (commodity or "").strip() if commodity is not None else ""
+    if not st or not dist:
+        return []
+    async with get_connection(settings) as db:
+        if comm:
+            cur = await db.execute(
+                """
+                SELECT id, state, district, market, commodity, variety,
+                       min_price, max_price, modal_price, price_date, fetched_at, expires_at
+                FROM mandi_prices
+                WHERE lower(state) = lower(?) AND lower(district) = lower(?)
+                  AND lower(commodity) = lower(?)
+                  AND expires_at > ?
+                ORDER BY price_date DESC, id DESC
+                """,
+                (st, dist, comm, now),
+            )
+        else:
+            cur = await db.execute(
+                """
+                SELECT id, state, district, market, commodity, variety,
+                       min_price, max_price, modal_price, price_date, fetched_at, expires_at
+                FROM mandi_prices
+                WHERE lower(state) = lower(?) AND lower(district) = lower(?)
+                  AND expires_at > ?
+                ORDER BY price_date DESC, id DESC
+                """,
+                (st, dist, now),
+            )
+        rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def upsert_mandi_prices_bulk(
+    state: str,
+    district: str,
+    records: List[Dict[str, Any]],
+    ttl_seconds: int,
+    settings: Optional[Settings] = None,
+    *,
+    commodity_filter: Optional[str] = None,
+) -> None:
+    """Replace mandi rows for a state+district (full sync), or only one commodity (tool backfill).
+
+    When ``commodity_filter`` is set, only rows matching that commodity (case-insensitive)
+    under the same state+district are removed before insert — other cached commodities stay.
+    """
+    st = (state or "").strip()
+    dist = (district or "").strip()
+    if not st or not dist:
+        raise ValueError("state and district are required for mandi upsert")
+    now = int(time.time())
+    expires_at = now + max(60, int(ttl_seconds))
+    async with get_connection(settings) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            if commodity_filter and str(commodity_filter).strip():
+                cf = str(commodity_filter).strip()
+                await db.execute(
+                    """
+                    DELETE FROM mandi_prices
+                    WHERE lower(state) = lower(?) AND lower(district) = lower(?)
+                      AND lower(commodity) = lower(?)
+                    """,
+                    (st, dist, cf),
+                )
+            else:
+                await db.execute(
+                    """
+                    DELETE FROM mandi_prices
+                    WHERE lower(state) = lower(?) AND lower(district) = lower(?)
+                    """,
+                    (st, dist),
+                )
+            for rec in records:
+                mp = rec.get("modal_price")
+                if mp is None:
+                    continue
+                try:
+                    mp_f = float(mp)
+                except (TypeError, ValueError):
+                    continue
+                comm = str(rec.get("commodity") or "").strip()
+                if not comm:
+                    continue
+                await db.execute(
+                    """
+                    INSERT INTO mandi_prices (
+                        state, district, market, commodity, variety,
+                        min_price, max_price, modal_price, price_date,
+                        fetched_at, expires_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(rec.get("state") or st),
+                        str(rec.get("district") or dist),
+                        str(rec.get("market") or ""),
+                        comm,
+                        str(rec.get("variety") or ""),
+                        rec.get("min_price"),
+                        rec.get("max_price"),
+                        mp_f,
+                        str(rec.get("price_date") or ""),
+                        now,
+                        expires_at,
+                    ),
+                )
+        except Exception:
+            await db.rollback()
+            raise
+        await db.commit()
 
 
 # --- Supabase sync helpers ---

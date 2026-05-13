@@ -17,6 +17,7 @@ Most endpoints return JSON. The offline bundle endpoint returns **gzipped JSON**
 | POST | `/api/v1/query/stream` | Streaming agent call (SSE) |
 | GET | `/api/v1/sync/bundle` | Offline bundle (district-scoped, gzip) |
 | POST | `/api/v1/sync/push` | Push unsynced local SQLite data to Supabase (optional) |
+| POST | `/api/v1/market/sync` | Pull OGD mandi prices for `state` + `district` into local SQLite |
 | POST | `/api/v1/conversation` | Create a new chat session (`conversation_id` + metadata) |
 | GET | `/api/v1/farmer/{farmer_id}/conversations` | List all `conversation_id` values (sessions) for a farmer |
 | GET | `/api/v1/farmer/{farmer_id}/conversations/{conversation_id}/history` | Session transcript (`messages` + metadata) |
