@@ -394,7 +394,7 @@ REST + JSON; **frontend is separate** (RN app) — integrate via OpenAPI (`/docs
 | Method | Path | Description |
 | :--- | :--- | :--- |
 | `GET` | `/api/v1/health` | Liveness + Gemma 4 reachability |
-| `POST` | `/api/v1/query` | Main agent query (references uploaded images via `image_ref`) |
+| `POST` | `/api/v1/query/stream` | Main agent query (SSE; references uploaded images via `image_ref`) |
 | `POST` | `/api/v1/query/image` | Multipart image upload (JPEG/PNG ≤ 5 MB) → returns `image_ref` |
 | `POST` | `/api/v1/conversation` | Create chat session; returns `conversation_id` |
 | `GET` | `/api/v1/farmer/{farmer_id}/conversations` | List sessions / `conversation_id` values for a farmer |
@@ -402,9 +402,9 @@ REST + JSON; **frontend is separate** (RN app) — integrate via OpenAPI (`/docs
 | `GET` | `/api/v1/farmer/{farmer_id}/twin` | Read digital twin |
 | `PUT` | `/api/v1/farmer/{farmer_id}/twin` | Update twin (partial OK) |
 
-All non-2xx responses use the unified error envelope defined in [`docs/api_contract.md`](docs/api_contract.md) §12, including a `fallback_hint` (`USE_ONDEVICE` / `RETRY_ONLINE_LATER` / `null`) that the RN app uses to choose between on-device re-run and a retry CTA.
+All non-2xx responses use the unified error envelope defined in [`docs/api_contract.md`](docs/api_contract.md) §11, including a `fallback_hint` (`USE_ONDEVICE` / `RETRY_ONLINE_LATER` / `null`) that the RN app uses to choose between on-device re-run and a retry CTA.
 
-### `POST /api/v1/query`
+### `POST /api/v1/query/stream`
 
 **Request**
 
@@ -427,6 +427,10 @@ All non-2xx responses use the unified error envelope defined in [`docs/api_contr
 ```
 
 **Response**
+
+Server-Sent Events (`text/event-stream`): stream `text-delta` chunks for the assistant message, then a `data-metadata` frame whose `data` object matches the JSON shape below **except** the assistant `text` (reconstruct display text from deltas). See [`docs/api_contract.md`](docs/api_contract.md) §6.
+
+Equivalent final metadata (non-streaming shape for reference):
 
 ```json
 {
@@ -480,7 +484,7 @@ krishisaathi-ai/
 ├── api/
 │   ├── main.py
 │   ├── routes/
-│   │   ├── query.py          # POST /query, GET /query/stream (SSE)
+│   │   ├── query.py          # POST /query/stream (SSE), POST /query/image
 │   │   ├── farmer.py
 │   │   └── health.py
 │   └── middleware/
@@ -537,7 +541,7 @@ krishisaathi-ai/
 
 | Topic | Approach |
 | :--- | :--- |
-| API | Stateless `POST /api/v1/query`; SQLite-backed rate limit per `farmer_id` (~10 req/min) |
+| API | Stateless `POST /api/v1/query/stream`; SQLite-backed rate limit per `farmer_id` (~10 req/min) |
 | Long tools | In-process per-tool timeouts (`VISION_TIMEOUT_SECONDS`, `LLM_TOOL_TIMEOUT_SECONDS`, `CLIMATE_TIMEOUT_SECONDS`, `IO_TOOL_TIMEOUT_SECONDS`; `TOOL_TIMEOUT_SECONDS` = fallback for unknown tools); extend with job queue later |
 | Data | SQLite file + Chroma directory — mount a volume in Docker (`docker-compose.yml`) |
 | Models | `config/settings.py` + env (`AI_STUDIO_MODEL`, `AI_STUDIO_ESCALATION_MODEL`) |

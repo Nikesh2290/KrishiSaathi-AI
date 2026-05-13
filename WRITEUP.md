@@ -33,7 +33,7 @@ KrishiSaathi is a **hybrid on-device + cloud** AI agent:
 ```
 RN app (MediaPipe, Gemma 4 E4B/E2B)
   ├── offline intents → on-device
-  └── online intents → POST /api/v1/query → this backend
+  └── online intents → POST /api/v1/query/stream → this backend
                                               ├── LangGraph StateGraph
                                               │   (route → plan → tools → synth → safety → respond)
                                               ├── Gemma 4 26B A4B on AI Studio

@@ -13,5 +13,19 @@ services:
     volumes:
       - krishi-data:/data
 
+  voice-agent:
+    build: .
+    command: ["python", "-m", "voice_agent.worker", "start"]
+    environment:
+      - DATABASE_PATH=/data/krishisaathi.db
+      - CHROMA_PATH=/data/chroma
+      - KRISHI_API_BASE_URL=http://api:7860
+    env_file:
+      - .env
+    volumes:
+      - krishi-data:/data
+    depends_on:
+      - api
+
 volumes:
   krishi-data:

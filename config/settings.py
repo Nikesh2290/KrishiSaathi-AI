@@ -121,6 +121,33 @@ class Settings(BaseSettings):
         default=0.70, alias="CONFIDENCE_THRESHOLD_LOW"
     )
 
+    # LiveKit — voice room join tokens (API) + worker env (same vars)
+    livekit_url: str = Field(default="", alias="LIVEKIT_URL")
+    livekit_api_key: str = Field(default="", alias="LIVEKIT_API_KEY")
+    livekit_api_secret: str = Field(default="", alias="LIVEKIT_API_SECRET")
+    voice_token_ttl_seconds: int = Field(
+        default=3600,
+        alias="VOICE_TOKEN_TTL_SECONDS",
+        description="JWT lifetime for LiveKit participant tokens (seconds).",
+    )
+
+    # Voice worker calls this Krishi HTTP API (compose: http://api:7860)
+    krishi_api_base_url: str = Field(
+        default="http://127.0.0.1:8000",
+        alias="KRISHI_API_BASE_URL",
+        description="Base URL for POST /api/v1/query/stream from the LiveKit voice worker.",
+    )
+
+    # Deepgram STT + TTS (voice worker; plugins also read DEEPGRAM_API_KEY from env)
+    deepgram_api_key: str = Field(default="", alias="DEEPGRAM_API_KEY")
+
+    # Dev fallback when participant JWT metadata is missing
+    voice_default_farmer_id: str = Field(
+        default="",
+        alias="VOICE_DEFAULT_FARMER_ID",
+        description="Optional UUID string; voice worker uses this if join token had no farmer metadata.",
+    )
+
     @property
     def cors_origins_list(self) -> List[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
@@ -136,6 +163,10 @@ class Settings(BaseSettings):
             self.supabase_url
             and (self.supabase_service_role_key or self.supabase_anon_key)
         )
+
+    @property
+    def livekit_configured(self) -> bool:
+        return bool(self.livekit_url and self.livekit_api_key and self.livekit_api_secret)
 
 
 @lru_cache

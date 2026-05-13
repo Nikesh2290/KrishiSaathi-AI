@@ -1,6 +1,8 @@
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from tests.query_stream_utils import consume_query_stream
+
 
 @pytest.mark.asyncio
 async def test_post_query_image_returns_ref():
@@ -76,9 +78,10 @@ async def test_image_ref_flows_into_query(monkeypatch):
         assert r.status_code == 201, r.text
         image_ref = r.json()["image_ref"]
 
-        r = await client.post(
-            "/api/v1/query",
-            json={
+        _events, err = await consume_query_stream(
+            client,
+            path="/api/v1/query/stream",
+            json_body={
                 "farmer_id": "f1",
                 "query": {
                     "text": "मेरी गेहूं की फसल पीली पड़ रही है",
@@ -92,14 +95,16 @@ async def test_image_ref_flows_into_query(monkeypatch):
                 },
             },
         )
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["model_used"].startswith("gemma-4-")
-    assert "vision" in body["tool_trace"]
+        assert err is None, err
+        metas = [e["data"] for e in _events if e.get("type") == "data-metadata" and isinstance(e.get("data"), dict)]
+        assert metas, _events
+        meta = metas[-1]
+        assert meta["model_used"].startswith("gemma-4-")
+        assert "vision" in meta["tool_trace"]
 
 
 @pytest.mark.asyncio
-async def test_expired_image_ref_returns_404_envelope(monkeypatch):
+async def test_expired_image_ref_emits_stream_error(monkeypatch):
     from tests.fakes.fake_gemma_client import install_fake
     from api.main import app
 
@@ -108,13 +113,14 @@ async def test_expired_image_ref_returns_404_envelope(monkeypatch):
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://t"
     ) as client:
-        r = await client.post(
-            "/api/v1/query",
-            json={
+        _events2, err2 = await consume_query_stream(
+            client,
+            path="/api/v1/query/stream",
+            json_body={
                 "farmer_id": "f1",
                 "query": {"text": "photo?", "image_ref": "img_deadbeef"},
                 "context": {"connectivity": "online", "device_intent": "crop_disease"},
             },
         )
-    assert r.status_code == 404
-    assert r.json()["error"]["code"] == "IMAGE_REF_EXPIRED"
+    assert err2 is not None
+    assert err2.get("errorCode") == "IMAGE_REF_EXPIRED"
