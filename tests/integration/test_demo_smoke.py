@@ -58,29 +58,35 @@ async def test_demo_smoke_all_four_beats(monkeypatch):
         assert isinstance(body["data"]["schemes"], list) and len(body["data"]["schemes"]) > 0
 
         # Beat 3: online scheme query
+        from voice_agent.query_stream_client import collect_from_query_stream
+
         fake.plan_response = {
             "tools": [{"tool": "scheme", "params": {"query": "PM Fasal Bima"}}]
         }
-        r = await client.post(
-            "/api/v1/query",
-            json={
-                "farmer_id": "smoke-f1",
-                "query": {
-                    "text": "PM Fasal Bima kaise apply karein?",
-                    "language": "hi",
-                },
-                "context": {
-                    "connectivity": "online",
-                    "device_intent": "scheme_query",
-                    "location": {"district": "Ludhiana", "state": "Punjab"},
-                },
+        scheme_payload = {
+            "farmer_id": "smoke-f1",
+            "query": {
+                "text": "PM Fasal Bima kaise apply karein?",
+                "language": "hi",
             },
+            "context": {
+                "connectivity": "online",
+                "device_intent": "scheme_query",
+                "location": {"district": "Ludhiana", "state": "Punjab"},
+            },
+        }
+        _text, meta = await collect_from_query_stream(
+            client,
+            api_base=str(client.base_url).rstrip("/"),
+            payload=scheme_payload,
         )
-        assert r.status_code == 200, r.text
-        q = r.json()
-        assert q["model_used"].startswith("gemma-4-")
-        assert q["data_source"] == "live"
-        assert any(t in q["tool_trace"] for t in ("scheme", "scheme_0", "safety_escalation"))
+        assert meta is not None, meta
+        assert meta["model_used"].startswith("gemma-4-")
+        assert meta["data_source"] == "live"
+        assert any(
+            t in (meta.get("tool_trace") or [])
+            for t in ("scheme", "scheme_0", "safety_escalation")
+        )
 
         # Beat 4: image upload + vision query
         with open("tests/fixtures/wheat_rust.jpg", "rb") as f:
@@ -96,23 +102,24 @@ async def test_demo_smoke_all_four_beats(monkeypatch):
         fake.plan_response = {
             "tools": [{"tool": "vision", "params": {"use_image": True}}]
         }
-        r = await client.post(
-            "/api/v1/query",
-            json={
-                "farmer_id": "smoke-f1",
-                "query": {
-                    "text": "पत्ता पीला है",
-                    "image_ref": image_ref,
-                    "language": "hi",
-                },
-                "context": {
-                    "connectivity": "online",
-                    "device_intent": "crop_disease",
-                    "location": {"district": "Ludhiana", "state": "Punjab"},
-                },
+        vision_payload = {
+            "farmer_id": "smoke-f1",
+            "query": {
+                "text": "पत्ता पीला है",
+                "image_ref": image_ref,
+                "language": "hi",
             },
+            "context": {
+                "connectivity": "online",
+                "device_intent": "crop_disease",
+                "location": {"district": "Ludhiana", "state": "Punjab"},
+            },
+        }
+        _vtext, vmeta = await collect_from_query_stream(
+            client,
+            api_base=str(client.base_url).rstrip("/"),
+            payload=vision_payload,
         )
-        assert r.status_code == 200, r.text
-        v = r.json()
-        assert v["structured"]["kind"] in {"disease", "general"}
-        assert v["model_used"].startswith("gemma-4-")
+        assert vmeta is not None, vmeta
+        assert vmeta["structured"]["kind"] in {"disease", "general"}
+        assert vmeta["model_used"].startswith("gemma-4-")

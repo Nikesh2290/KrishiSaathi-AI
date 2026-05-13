@@ -21,7 +21,7 @@ if connectivity == "offline":
 elif intent in {"weather", "crop_plan", "general", "alert"}:
     use on-device (even when online — latency + data saver)
 else:
-    POST /api/v1/query  (backend gemma-4-26b-a4b-it)
+    POST /api/v1/query/stream  (backend gemma-4-26b-a4b-it)
 ```
 
 ## 3. Confidence threshold
@@ -30,7 +30,7 @@ else:
 const CONFIDENCE_THRESHOLD_LOW = 0.70;
 ```
 
-If an on-device response has `confidence < 0.70`, render the answer with a non-blocking CTA: "Get expert analysis (needs internet)". On tap + online, call `POST /api/v1/query` with the same query.
+If an on-device response has `confidence < 0.70`, render the answer with a non-blocking CTA: "Get expert analysis (needs internet)". On tap + online, call `POST /api/v1/query/stream` with the same query.
 
 ## 4. Fallback on backend errors
 
@@ -43,9 +43,9 @@ Always read `error.fallback_hint`:
 ## 5. Image flow
 
 1. `POST /api/v1/query/image` (multipart) → `{ image_ref, expires_at }`.
-2. `POST /api/v1/query` with `query.image_ref` set. Do not send base64 in `/query`.
+2. `POST /api/v1/query/stream` with `query.image_ref` set. Do not send base64 in the stream body.
 
-`image_ref` TTL is 1 hour. On 404 `IMAGE_REF_EXPIRED`, re-upload.
+`image_ref` TTL is 1 hour. On stream `errorCode` `IMAGE_REF_EXPIRED`, re-upload.
 
 ## 6. First-launch sync
 
@@ -92,7 +92,7 @@ See `docs/api_contract.md` Section 6 for the full error code table.
 
 ```ts
 // Online scheme query
-await fetch(`${BASE}/api/v1/query`, {
+await fetch(`${BASE}/api/v1/query/stream`, {
   method: "POST",
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify({
@@ -114,3 +114,11 @@ fd.append("farmer_id", farmerId);
 fd.append("purpose", "crop_disease");
 await fetch(`${BASE}/api/v1/query/image`, { method: "POST", body: fd });
 ```
+
+## Voice (LiveKit)
+
+1. After login, call `POST ${BASE}/api/v1/voice/token` with `{ farmer_id, conversation_id?, language? }`.
+2. Use `@livekit/react-native` (or the web client SDK) with `serverUrl`, `token`, and `room` from the response. Publish microphone audio for the voice session.
+3. Run the backend voice worker separately (Docker Compose service `voice-agent`, or `python -m voice_agent.worker start` locally) so an agent joins the same room, transcribes speech, calls `POST /api/v1/query/stream`, and plays TTS.
+
+Worker environment: `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `DEEPGRAM_API_KEY` (STT + TTS), optional `DEEPGRAM_TTS_MODEL`, `KRISHI_API_BASE_URL` (in Compose use `http://api:7860`).

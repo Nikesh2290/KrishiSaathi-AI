@@ -46,23 +46,18 @@
       }
     },
     {
-      "name": "Query",
+      "name": "Query stream (SSE)",
       "request": {
         "method": "POST",
-        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Accept", "value": "text/event-stream" }
+        ],
         "body": {
           "mode": "raw",
           "raw": "{\n  \"farmer_id\": \"demo-farmer-1\",\n  \"conversation_id\": \"REPLACE_WITH_CREATE_CONVERSATION_RESPONSE\",\n  \"query\": { \"text\": \"PM-KISAN के लिए पात्रता क्या है?\", \"language\": \"hi\" },\n  \"context\": { \"location\": { \"lat\": 30.65, \"lng\": 75.95, \"district\": \"Ludhiana\" }, \"connectivity\": \"online\", \"device_intent\": \"scheme_query\" }\n}"
         },
-        "url": "{{baseUrl}}/api/v1/query"
-      }
-    },
-    {
-      "name": "Query stream (SSE)",
-      "request": {
-        "method": "GET",
-        "header": [],
-        "url": "{{baseUrl}}/api/v1/query/stream?farmer_id=demo-farmer-1&q=weather&connectivity=online&lat=30.65&lng=75.95&device_intent=weather"
+        "url": "{{baseUrl}}/api/v1/query/stream"
       }
     },
     {

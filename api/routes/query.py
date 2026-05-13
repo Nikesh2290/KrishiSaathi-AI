@@ -1,4 +1,4 @@
-"""Query endpoints (POST /query; POST /query/image added in Task 11)."""
+"""Query endpoints (POST /query/stream; POST /query/image)."""
 
 from __future__ import annotations
 
@@ -10,14 +10,12 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, File, Form, UploadFile
 from fastapi.responses import StreamingResponse
 
-from agent.graph import run_graph, run_graph_stream
+from agent.graph import run_graph_stream
 from config.settings import get_settings
 from db.persistence import persist_log_query
 from models.errors import ErrorCode, KrishiHTTPException
 from models.request import AgentRequest
-from models.response import AgentResponse, StructuredResult
 from modules.vision import image_store
-from response.generator import build
 
 logger = logging.getLogger(__name__)
 
@@ -139,53 +137,6 @@ def _smalltalk_reply(text: str) -> tuple[str, str] | None:
     return None
 
 
-@router.post("/query", response_model=AgentResponse)
-async def post_query(body: AgentRequest) -> AgentResponse:
-    settings = get_settings()
-    if not body.query.image_ref:
-        st = _smalltalk_reply(body.query.text or "")
-        if st:
-            kind, reply = st
-            return AgentResponse(
-                text=reply,
-                structured=StructuredResult(kind=kind, data={"intent": kind}),
-                data_source="live",
-                confidence_level="high",
-                confidence_score=0.99,
-                model_used="rules",
-                tool_trace=["smalltalk"],
-                language=body.query.language,
-                conversation_id=body.conversation_id,
-            )
-    state = await run_graph(body)
-    resp = build(
-        draft_text=state.get("draft_text") or "",
-        tool_results=state.get("tool_results") or {},
-        tool_trace=state.get("tool_trace") or [],
-        data_source=state.get("data_source") or "live",
-        language=body.query.language,
-        safety_flags=state.get("safety_flags") or [],
-        model_used=state.get("model_used") or settings.ai_studio_model,
-        confidence_score=float(state.get("confidence_score") or 0.5),
-        fallback_hint=state.get("fallback_hint"),
-    )
-    resp.conversation_id = body.conversation_id
-    try:
-        await persist_log_query(
-            body.query.text,
-            resp.structured.kind,
-            resp.text[:2000],
-            resp.data_source,
-            body.context.connectivity,
-            farmer_id=body.farmer_id,
-            conversation_id=body.conversation_id,
-            settings=settings,
-        )
-    except Exception as e:
-        logger.warning("log_query failed: %s", e)
-    return resp
-
-
 @router.post("/query/stream")
 async def post_query_stream(body: AgentRequest) -> StreamingResponse:
     async def event_stream():
@@ -194,6 +145,20 @@ async def post_query_stream(body: AgentRequest) -> StreamingResponse:
                 st = _smalltalk_reply(body.query.text or "")
                 if st:
                     _kind, reply = st
+                    settings = get_settings()
+                    try:
+                        await persist_log_query(
+                            body.query.text,
+                            _kind,
+                            reply[:2000],
+                            "live",
+                            body.context.connectivity,
+                            farmer_id=body.farmer_id,
+                            conversation_id=body.conversation_id,
+                            settings=settings,
+                        )
+                    except Exception as e:
+                        logger.warning("log_query failed: %s", e)
                     payload: dict[str, object] = {"type": "text-delta", "delta": reply}
                     yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
                     meta = {"type": "data-metadata", "data": {"conversation_id": body.conversation_id}}
@@ -208,6 +173,15 @@ async def post_query_stream(body: AgentRequest) -> StreamingResponse:
                     if data is not None:
                         payload.update(data)
                     yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        except KrishiHTTPException as exc:
+            err_obj = {
+                "type": "error",
+                "errorText": str(exc.detail),
+                "errorCode": exc.code.value,
+                "statusCode": exc.status_code,
+            }
+            yield f"data: {json.dumps(err_obj, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
         except Exception as e:
             logger.exception("query/stream failed: %s", e)
             err_payload = json.dumps({"type": "error", "errorText": str(e)})

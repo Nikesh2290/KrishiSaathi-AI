@@ -3,7 +3,7 @@
 Base URL (local): `http://localhost:8000`. OpenAPI UI: `/docs`.
 Backend version: `0.2.0`. Hackathon: Gemma 4 Good.
 
-Most endpoints return JSON. The offline bundle endpoint returns **gzipped JSON**. All errors use the unified envelope (Section 12).
+Most endpoints return JSON. The offline bundle endpoint returns **gzipped JSON**. All errors use the unified envelope (Section 11).
 
 ## Endpoints
 
@@ -12,9 +12,8 @@ Most endpoints return JSON. The offline bundle endpoint returns **gzipped JSON**
 | GET | `/api/v1/health` | Liveness + Gemma 4 reachability |
 | POST | `/api/v1/auth/signup` | Create Supabase user; returns stable `farmer_id` UUID + tokens |
 | POST | `/api/v1/auth/login` | Login Supabase user; returns stable `farmer_id` UUID + tokens |
-| POST | `/api/v1/query` | Main agent call |
+| POST | `/api/v1/query/stream` | Main agent call (Server-Sent Events; canonical) |
 | POST | `/api/v1/query/image` | Multipart image upload |
-| POST | `/api/v1/query/stream` | Streaming agent call (SSE) |
 | GET | `/api/v1/sync/bundle` | Offline bundle (district-scoped, gzip) |
 | POST | `/api/v1/sync/push` | Push unsynced local SQLite data to Supabase (optional) |
 | POST | `/api/v1/market/sync` | Pull OGD mandi prices for `state` + `district` into local SQLite |
@@ -24,6 +23,34 @@ Most endpoints return JSON. The offline bundle endpoint returns **gzipped JSON**
 | DELETE | `/api/v1/farmer/{farmer_id}/conversations/{conversation_id}` | Delete session and all turns (queues for Supabase when offline) |
 | GET | `/api/v1/farmer/{farmer_id}/twin` | Read digital twin |
 | PUT | `/api/v1/farmer/{farmer_id}/twin` | Update twin |
+| POST | `/api/v1/voice/token` | Mint LiveKit room JWT for voice (see Voice section) |
+
+## Voice (LiveKit)
+
+Voice uses **LiveKit** WebRTC: the app obtains a short-lived participant JWT from this API, connects to `server_url` with `participant_token`, and joins `room_name`. A separate **voice worker** process (`python -m voice_agent.worker start`) must be running with `LIVEKIT_*`, `DEEPGRAM_API_KEY` (STT + TTS), optional `DEEPGRAM_TTS_MODEL`, and `KRISHI_API_BASE_URL` set. The worker transcribes speech, calls `POST /api/v1/query/stream`, and plays TTS.
+
+### `POST /api/v1/voice/token`
+
+**Request (JSON)**
+
+- `farmer_id` (string, required): same UUID as auth / query.
+- `conversation_id` (string|null): optional session id for query logging continuity.
+- `room_name` (string|null): optional; server generates `krishi-{farmer}-{random}` if omitted.
+- `participant_identity` (string|null): optional; default `farmer-{first8}`.
+- `language` (string): default `hi`; stored in participant metadata for the worker.
+
+**Response 200 (JSON)**
+
+- `server_url` (string): LiveKit URL (usually `wss://...`).
+- `room_name` (string): room to join.
+- `participant_token` (string): JWT for the client SDK.
+- `participant_identity` (string): identity encoded in the JWT (`sub` claim).
+
+**Response 503**
+
+LiveKit env vars are not configured on the API.
+
+Participant JWT **metadata** is JSON: `{"farmer_id","conversation_id","language"}` so the voice worker can call `/query/stream` with the correct farmer context.
 
 ## 1. `GET /api/v1/health`
 
@@ -182,9 +209,9 @@ Session metadata plus `messages` (oldest first): each message has `id`, `query_t
 
 **404** — session missing or `farmer_id` does not own this `conversation_id`.
 
-## 6. `POST /api/v1/query`
+## 6. `POST /api/v1/query/stream` (SSE) — main assistant
 
-Request:
+Request example (JSON):
 
 ```json
 {
@@ -206,7 +233,7 @@ Request:
 
 **What it does / used for**
 
-- Main assistant call. Returns a natural language answer plus optional structured data.
+- Main assistant call. Streams a natural language answer as `text-delta` events and emits structured metadata at the end.
 - Works in online/offline/degraded modes depending on `context.connectivity` and server configuration.
 
 **Request fields**
@@ -215,7 +242,7 @@ Request:
 - `conversation_id` (string, optional): thread id from `POST /api/v1/conversation`. When set with `farmer_id`, the server upserts `conversation_metadata` and attaches turns in `query_history` to this session.
 - `query` (object, optional): user input payload.
   - `query.text` (string): user text question (default `""`).
-  - `query.voice_b64` (string|null): base64 audio (if you implement voice capture; may be ignored by some builds).
+  - `query.voice_b64` (string|null): base64 audio (optional; may be ignored).
   - `query.image_ref` (string|null): reference returned by `POST /api/v1/query/image` (Section 7).
   - `query.language` (string): short language code (default `"hi"`).
 - `context` (object, optional): device + situation context.
@@ -224,41 +251,18 @@ Request:
   - `context.device_intent` (string): client-side intent hint (default `"general"`).
   - `context.device_capabilities` (object): free-form device capabilities (e.g. `{ "ondevice_model": "..." }`).
 
-Response 200:
+**Response 200**
 
-```json
-{
-  "response_id": "uuid",
-  "text": "...",
-  "structured": { "kind": "disease", "data": {} },
-  "data_source": "live",
-  "confidence_level": "high",
-  "confidence_score": 0.87,
-  "model_used": "gemma-4-26b-a4b-it",
-  "tool_trace": ["vision", "climate"],
-  "safety_flags": [],
-  "fallback_hint": null,
-  "language": "hi",
-  "timestamp": "2026-04-20T12:00:00Z"
-}
-```
+- Content-Type: `text/event-stream`; header `x-vercel-ai-ui-message-stream: v1`.
+- Frames are `data: <json>` lines separated by blank lines; stream ends with `data: [DONE]`.
+- Assistant text: sum all `{"type":"text-delta","delta":"..."}` payloads (see also `text-start` / `text-end` with shared `id`).
+- Final response metadata: `{"type":"data-metadata","data":{...}}` where `data` matches `AgentResponse` **without** the `text` field (use streamed deltas for text).
 
-**Response fields**
+**Stream error frames**
 
-- `response_id` (string): unique id for this response.
-- `text` (string): final natural-language answer to display.
-- `structured` (object): typed machine-readable payload (optional; depends on intent/tools).
-  - `structured.kind` (string): kind/category of structured output (default `"general"`).
-  - `structured.data` (object): structured data payload for the given kind.
-- `data_source` (string): `"live"` or `"offline"`.
-- `confidence_level` (string): `"high" | "medium" | "low"`.
-- `confidence_score` (number): \(0..1\) score.
-- `model_used` (string): model identifier that produced the answer.
-- `tool_trace` (array of strings): tools invoked (high-level trace).
-- `safety_flags` (array of strings): safety signals/flags (if any).
-- `fallback_hint` (string|null): `"USE_ONDEVICE"` or `"RETRY_ONLINE_LATER"` when applicable.
-- `language` (string): output language code.
-- `timestamp` (string): ISO timestamp (UTC).
+- `{"type":"error","errorText":"...","errorCode":"IMAGE_REF_EXPIRED","statusCode":404}` — typed `KrishiHTTPException` surfaced on the wire (HTTP status may still be 200).
+
+The non-streaming endpoint `POST /api/v1/query` has been **removed**; clients must use this route.
 
 ## 7. `POST /api/v1/query/image`
 
@@ -284,7 +288,7 @@ Response 201:
 **What it does / used for**
 
 - Uploads an image to the server and returns a temporary `image_ref`.
-- Use the `image_ref` in `POST /api/v1/query` as `query.image_ref`.
+- Use the `image_ref` in `POST /api/v1/query/stream` as `query.image_ref`.
 
 **Response fields**
 
@@ -293,40 +297,7 @@ Response 201:
 - `mime` (string): detected mime type (JPEG/PNG).
 - `bytes` (number): original byte size.
 
-## 8. `POST /api/v1/query/stream` (SSE)
-
-**What it does / used for**
-
-- Same logical operation as `POST /api/v1/query`, but returns incremental updates as **Server-Sent Events**.
-- Useful for low-latency UIs that want token/tool streaming.
-
-**Request body (JSON)** — same as `POST /api/v1/query`.
-
-**Response 200**
-
-- Content-Type: `text/event-stream`
-- Each message is an SSE frame:
-  - `event: <event_type>`
-  - `data: <payload>`
-  - blank line terminator
-
-Example frame:
-
-```text
-event: token
-data: {"text":"..."}
-
-```
-
-On server-side errors, an `error` event is emitted:
-
-```text
-event: error
-data: {"code":"STREAM_ERROR","message":"..."}
-
-```
-
-## 9. `GET /api/v1/sync/bundle`
+## 8. `GET /api/v1/sync/bundle`
 
 Query params: `state` (required), `district` (required), `bundle_version` (optional).
 
@@ -359,7 +330,7 @@ Payload (after gunzip):
   - crop calendar (global)
   - weather history (district filtered)
 
-## 10. `POST /api/v1/sync/push`
+## 9. `POST /api/v1/sync/push`
 
 **What it does / used for**
 
@@ -401,7 +372,7 @@ If sync ran:
 - `query_rows_synced` (number): number of query logs uploaded.
 - `scheme_chunks_synced` (number): number of scheme vector rows uploaded.
 
-## 11. Farmer twin
+## 10. Farmer twin
 
 Unchanged from v0.1:
 
@@ -433,7 +404,7 @@ Notes:
 - `PUT /twin` supports query param `connectivity` (default `online`). Use `offline` to queue for later Supabase sync.
 - `PUT /twin` requires `body.farmer_id == path farmer_id` (otherwise 400).
 
-## 12. Error envelope
+## 11. Error envelope
 
 Every non-2xx response:
 
@@ -461,10 +432,10 @@ Every non-2xx response:
 | 503 | `UPSTREAM_UNAVAILABLE` | true | `USE_ONDEVICE` |
 | 500 | `INTERNAL_ERROR` | false | `RETRY_ONLINE_LATER` |
 
-## 13. Languages
+## 12. Languages
 
 Short ISO codes in `query.language`: `hi`, `en`, `pa`, `te`, `mr`, `bn`.
 
-## 14. Auth
+## 13. Auth
 
 Optional header `X-Farmer-Id` for future use. Current hackathon build relies on `farmer_id` in the body.

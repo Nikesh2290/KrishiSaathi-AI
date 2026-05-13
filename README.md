@@ -15,7 +15,7 @@ Hybrid **Gemma 4** farmer assistant API for the Gemma 4 Good Hackathon.
 - **Backend escalation:** `gemma-4-31b-it` (Google AI Studio free tier)
 - **On-device (separate RN app):** `gemma-4-e4b-it` / `gemma-4-e2b-it` via MediaPipe LLM Inference
 
-Features: **LangGraph** agent loop, **Open-Meteo** weather, **ChromaDB** scheme RAG, **SQLite** persistence, district-scoped **offline sync bundle**, multipart image upload.
+Features: **LangGraph** agent loop, **Open-Meteo** weather, **ChromaDB** scheme RAG, **SQLite** persistence, district-scoped **offline sync bundle**, multipart image upload, optional **LiveKit voice** (token API + worker).
 
 **Optional:** **Supabase** for online Auth (email/password → stable `farmer_id` UUID), **Postgres** for twin + query history, **pgvector** for scheme retrieval. Apply [`db/migrations/supabase_schema.sql`](db/migrations/supabase_schema.sql) in the Supabase SQL editor, then set `SUPABASE_*` vars in `.env`. Offline mode still uses SQLite + Chroma; `POST /api/v1/sync/push` (or startup) uploads unsynced rows and scheme embeddings.
 
@@ -36,6 +36,8 @@ Features: **LangGraph** agent loop, **Open-Meteo** weather, **ChromaDB** scheme 
    pip install -r requirements.txt
    python -m uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
    ```
+
+   **Voice (LiveKit, optional):** add `LIVEKIT_*` and `DEEPGRAM_API_KEY` to `.env` (see [.env.example](.env.example)); optional `DEEPGRAM_TTS_MODEL` selects the Deepgram Aura voice. In a second terminal run `python -m voice_agent.worker start` (after `pip install -r requirements.txt`). The app calls `POST /api/v1/voice/token` for a room JWT; the worker joins the same room and bridges speech to `POST /api/v1/query/stream`. With Docker Compose, `docker compose up` starts both `api` and `voice-agent`.
 
 4. **Docs**
 
