@@ -9,7 +9,7 @@ import uuid
 from datetime import timedelta
 
 from fastapi import APIRouter, HTTPException
-from livekit.api import AccessToken, VideoGrants
+from livekit.api import AccessToken, CreateAgentDispatchRequest, LiveKitAPI, VideoGrants
 
 from config.settings import get_settings
 from models.voice import VoiceTokenRequest, VoiceTokenResponse
@@ -64,6 +64,22 @@ async def post_voice_token(body: VoiceTokenRequest) -> VoiceTokenResponse:
     except ValueError as e:
         logger.warning("livekit token build failed: %s", e)
         raise HTTPException(status_code=500, detail="Could not mint voice token.") from e
+
+    try:
+        async with LiveKitAPI(
+            url=settings.livekit_url,
+            api_key=settings.livekit_api_key,
+            api_secret=settings.livekit_api_secret,
+        ) as lkapi:
+            await lkapi.agent_dispatch.create_dispatch(
+                CreateAgentDispatchRequest(
+                    agent_name="krishi-voice-agent",
+                    room=room,
+                )
+            )
+        logger.info("agent dispatch created for room %s", room)
+    except Exception as exc:
+        logger.warning("agent dispatch failed for room %s: %s", room, exc)
 
     return VoiceTokenResponse(
         server_url=settings.livekit_url,
