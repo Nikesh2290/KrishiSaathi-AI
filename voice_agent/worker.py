@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -11,6 +12,7 @@ from typing import Any, Optional
 from dotenv import load_dotenv
 
 import httpx
+from livekit import rtc
 from livekit.agents import (
     Agent,
     AgentSession,
@@ -20,7 +22,7 @@ from livekit.agents import (
     cli,
     llm,
 )
-from livekit.agents.voice import ModelSettings
+from livekit.agents.voice import ModelSettings, room_io
 from livekit.plugins import deepgram, silero
 
 from voice_agent.query_stream_client import collect_text_from_query_stream
@@ -31,12 +33,34 @@ load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 logger = logging.getLogger(__name__)
 
+# LiveKit may send control text streams on this topic; drain them so the RTC layer
+# does not log "no callback attached" and streams complete cleanly.
+_LK_AGENT_REQUEST_TOPIC = "lk.agent.request"
+
+
+def _register_lk_agent_request_sink(room: rtc.Room) -> None:
+    def _on_text(reader: rtc.TextStreamReader, _participant_identity: str) -> None:
+        async def _drain() -> None:
+            try:
+                await reader.read_all()
+            except Exception:
+                logger.debug("lk.agent.request stream ended", exc_info=True)
+
+        asyncio.create_task(_drain())
+
+    try:
+        room.register_text_stream_handler(_LK_AGENT_REQUEST_TOPIC, _on_text)
+    except ValueError:
+        # Handler already registered (e.g. reconnect) — keep the first one.
+        pass
+
 
 def _last_user_message_text(chat_ctx: llm.ChatContext) -> str:
-    from livekit.agents.llm import ChatMessage, ChatRole
+    from livekit.agents.llm import ChatMessage
 
+    # ChatRole is Literal["developer","system","user","assistant"], not an enum.
     for it in reversed(chat_ctx.items):
-        if isinstance(it, ChatMessage) and it.role == ChatRole.USER:
+        if isinstance(it, ChatMessage) and it.role == "user":
             return (it.text_content or "").strip()
     return ""
 
@@ -49,6 +73,38 @@ def _parse_farmer_meta(metadata: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         logger.warning("participant metadata is not valid JSON")
         return {}
+
+
+def _deepgram_stt_language(locale: str) -> str:
+    """Single language for Deepgram live streaming (detect_language is not supported)."""
+    override = os.getenv("DEEPGRAM_STT_LANGUAGE", "").strip()
+    if override:
+        return override
+    raw = (locale or "hi").strip().replace("_", "-").lower()
+    if not raw or raw == "und":
+        return "hi"
+    base = raw.split("-", 1)[0]
+    if base in ("hi", "hin") and ("latn" in raw or "latin" in raw):
+        return "hi-Latn"
+    if base in ("hi", "hin"):
+        return "hi"
+    if base in ("en", "eng"):
+        return "en-IN" if len(raw.split("-")) == 1 or "in" in raw.split("-") else "en-US"
+    if base in ("ta", "tam"):
+        return "ta"
+    if base in ("taq",):
+        return "taq"
+    # Other Indian ISO codes: Deepgram nova streaming list varies — force explicit override or Hindi.
+    if base in ("te", "kn", "mr", "bn", "gu", "pa", "ml", "or", "as", "ur"):
+        logger.warning(
+            "voice locale %r has no built-in Deepgram STT mapping; using hi "
+            "(set DEEPGRAM_STT_LANGUAGE for a supported code).",
+            locale,
+        )
+        return "hi"
+    if base in ("multi", "mul"):
+        return "hi"
+    return base if len(base) == 2 else "hi"
 
 
 class KrishiVoiceAgent(Agent):
@@ -111,8 +167,15 @@ class KrishiVoiceAgent(Agent):
 
 async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
+    _register_lk_agent_request_sink(ctx.room)
 
-    participant = await ctx.wait_for_participant()
+    try:
+        participant = await ctx.wait_for_participant()
+    except RuntimeError as exc:
+        # Room disconnected before any participant arrived (e.g. client dropped early).
+        # This is a normal transient event — log at INFO and exit cleanly.
+        logger.info("Room disconnected before participant arrived, skipping job: %s", exc)
+        return
     meta = _parse_farmer_meta(participant.metadata)
 
     farmer_id = str(meta.get("farmer_id") or "").strip() or os.getenv(
@@ -143,10 +206,11 @@ async def entrypoint(ctx: JobContext) -> None:
     tts_model_name = os.getenv("DEEPGRAM_TTS_MODEL", "aura-2-andromeda-en").strip()
 
     vad = silero.VAD.load()
+    dg_lang = _deepgram_stt_language(language)
     stt_model = deepgram.STT(
         model="nova-3",
-        language="multi",
-        detect_language=True,
+        language=dg_lang,
+        detect_language=False,
         api_key=dg_key,
     )
     tts_model = deepgram.TTS(api_key=dg_key, model=tts_model_name)
@@ -166,10 +230,21 @@ async def entrypoint(ctx: JobContext) -> None:
         conversation_id=conv,
         language=language,
     )
-    await session.start(agent, room=ctx.room)
+    room_opts = room_io.RoomOptions(participant_identity=participant.identity)
+    try:
+        await session.start(agent, room=ctx.room, room_options=room_opts)
+    except RuntimeError as exc:
+        logger.info("Session could not start (room already gone?): %s", exc)
+        return
 
 
 if __name__ == "__main__":
     cli.run_app(
-        WorkerOptions(entrypoint_fnc=entrypoint, agent_name="krishi-voice-agent")
+        WorkerOptions(
+            entrypoint_fnc=entrypoint,
+            agent_name="krishi-voice-agent",
+            # Default prod threshold is 0.7; a single voice job often reports ~0.72 load,
+            # which flips the worker unavailable and breaks dispatch. 1.0 is valid for prod.
+            load_threshold=1.0,
+        )
     )
