@@ -32,10 +32,27 @@ def test_voice_token_returns_503_when_livekit_unconfigured(voice_client_no_livek
     assert r.status_code == 503
 
 
+class _FakeAgentDispatch:
+    async def create_dispatch(self, _req):
+        return None
+
+
+class _FakeLiveKitAPI:
+    def __init__(self, *args, **kwargs):
+        self.agent_dispatch = _FakeAgentDispatch()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return None
+
+
 def test_voice_token_mints_jwt(monkeypatch):
     monkeypatch.setenv("LIVEKIT_URL", "wss://example.livekit.cloud")
     monkeypatch.setenv("LIVEKIT_API_KEY", "testkey")
     monkeypatch.setenv("LIVEKIT_API_SECRET", "0123456789abcdef0123456789abcdef")
+    monkeypatch.setattr("api.routes.voice.LiveKitAPI", _FakeLiveKitAPI)
     get_settings.cache_clear()
 
     from api.main import create_app
