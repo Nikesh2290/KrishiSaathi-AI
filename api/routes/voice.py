@@ -50,7 +50,7 @@ async def post_voice_token(body: VoiceTokenRequest) -> VoiceTokenResponse:
     meta = {
         "farmer_id": body.farmer_id,
         "conversation_id": body.conversation_id,
-        "language": body.language or "hi",
+        "language": body.language or "en",
     }
     try:
         token = (

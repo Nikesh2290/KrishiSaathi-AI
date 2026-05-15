@@ -12,7 +12,7 @@ class VoiceTokenRequest(BaseModel):
     conversation_id: Optional[str] = None
     room_name: Optional[str] = None
     participant_identity: Optional[str] = None
-    language: str = Field(default="hi", min_length=1, max_length=16)
+    language: str = Field(default="en", min_length=1, max_length=16)
 
 
 class VoiceTokenResponse(BaseModel):

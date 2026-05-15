@@ -104,7 +104,7 @@ def _deepgram_stt_language(locale: str) -> str:
     override = os.getenv("DEEPGRAM_STT_LANGUAGE", "").strip()
     if override:
         return override
-    raw = (locale or "hi").strip().replace("_", "-").lower()
+    raw = (locale or "en").strip().replace("_", "-").lower()
     if not raw or raw == "und":
         return "hi"
     base = raw.split("-", 1)[0]
@@ -291,7 +291,7 @@ _TOOL_PHRASE_LISTS: dict[str, dict[str, list[str]]] = {
 
 def _build_voice_welcome(twin: FarmerTwin | None, session_lang: str) -> str:
     """Rich tiered welcome using twin profile (name, location, crops, land)."""
-    base = (session_lang or "hi").split("-", 1)[0].lower()
+    base = (session_lang or "en").split("-", 1)[0].lower()
     is_hi = base not in ("en", "eng")
 
     name = (twin.name.strip() if twin and twin.name else "") or None
@@ -366,7 +366,7 @@ class KrishiVoiceAgent(Agent):
         self._api_base = api_base.rstrip("/")
         self._farmer_id = farmer_id
         self._conversation_id = conversation_id
-        self._language = language or "hi"
+        self._language = language or "en"
         self._farmer_name = farmer_name
         super().__init__(
             instructions=(
@@ -555,7 +555,7 @@ async def entrypoint(ctx: JobContext) -> None:
         conv = None
     else:
         conv = str(raw_conv).strip() or None
-    language = str(meta.get("language") or "hi").strip() or "hi"
+    language = str(meta.get("language") or "en").strip() or "en"
 
     api_base = os.getenv("KRISHI_API_BASE_URL", "http://127.0.0.1:8000").strip()
 
