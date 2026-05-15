@@ -43,6 +43,7 @@ logger = logging.getLogger(__name__)
 
 CLARIFY_TOOL = "__clarify__"
 SMALLTALK_TOOL = "__smalltalk__"
+DIRECT_LLM_TOOL = "__direct_llm__"
 _ALLOWED_PLANNER_TOOLS = frozenset(
     {
         "climate",
@@ -57,13 +58,15 @@ _ALLOWED_PLANNER_TOOLS = frozenset(
 
 _LANGUAGE_RULE = (
     "LANGUAGE RULE (MANDATORY — follow before anything else): "
-    "Read the user's message text. Identify the language they used: "
-    "Hindi (Devanagari script), Hinglish (Hindi written in Roman/Latin script), or English. "
-    "Write your ENTIRE response in that SAME language. "
+    "Read the user's message text and identify the language style: "
+    "Devanagari Hindi, Roman Hinglish, English, or natural Hindi–English mix. "
+    "Reply in the SAME style. "
     "If they wrote in Devanagari Hindi → reply in Devanagari Hindi. "
     "If they wrote in Hinglish (Roman-script Hindi) → reply in Hinglish. "
     "If they wrote in English → reply in English. "
-    "Never switch languages mid-response. Technical terms (NPK, pH, KCC) may appear as-is."
+    "If they naturally mixed Hindi and English in one message → mirror that mix naturally; "
+    "do not force a single script. "
+    "Technical terms (NPK, pH, KCC, DAP, MSP) may appear as-is regardless of language."
 )
 
 
@@ -104,6 +107,27 @@ Rules:
 - End with ONE gentle open question inviting their real farming need
   (e.g. "Aaj kaise madad kar sakta hoon?" / "How can I help you today?").
 - Never invent or assume farming details."""
+
+_DIRECT_LLM_PROMPT_FULL = """You are KrishiSaathi, a knowledgeable assistant focused on Indian farming.
+
+Your task:
+- Answer the user's question completely and accurately, whatever the topic (general knowledge, chat, or farming).
+- Use farmer_profile when present: greet by name respectfully when natural.
+- After your main answer: if the question was NOT about farming, crops, soil, irrigation, mandi/markets, weather for crops, schemes/subsidies for farmers, loans/insurance for farmers, or farm pests/diseases, add ONE friendly closing sentence that you specialise in farming help and invite them to ask about crop, weather, mandi prices, or government schemes for farmers.
+- For voice-like replies: short sentences, no markdown lists, no headings — plain spoken language.
+
+CHAT HISTORY (when present in the JSON payload): prior turns; use only to resolve follow-ups and pronouns."""
+
+_DIRECT_LLM_PROMPT_VOICE = """You are KrishiSaathi for voice chat.
+
+Answer the user's question fully and accurately in their language.
+Farmer name from profile (use respectfully when natural): {name}.
+
+After answering: if the topic was not farming-related, add ONE short spoken sentence that you specialise in crop/weather/mandi/scheme help for farmers.
+
+Rules: short sentences; no markdown or bullet lists.
+
+CHAT HISTORY in the JSON resolves follow-ups — use it when needed."""
 
 # ------------------------------ state ------------------------------
 
@@ -203,6 +227,27 @@ CHAT HISTORY (when chat_history in input JSON is non-empty):
 - If chat_history is empty or absent, ignore this section entirely.
 """
 
+_PLANNER_PROMPT_VOICE = """Intent classifier for KrishiSaathi (voice). Infer meaning from typos and Hinglish.
+
+Return ONLY valid JSON (no markdown). Exactly ONE of:
+{"tools":[{"tool":"TOOL_NAME","params":{}}]}
+{"clarify": true, "question": "<one short clarifying question in user's language>"}
+{"smalltalk": true}
+
+Allowed tools & params:
+- general_qa — {"query": "<user question>"} — how-to agronomy, pests, irrigation, storage without live APIs.
+- crop_planner — {"season": "rabi|kharif|zaid", "crop": "<crop or wheat>"} — what to grow this season (NOT how-to plant a named crop).
+- climate — {"lat": number, "lng": number, "crop": string} — weather/forecast/rain.
+- vision — {"use_image": true|false} — disease from leaf photo if image_ref exists.
+- scheme — {"query": string} — govt schemes/subsidies.
+- market — {"crop": string, "district": string} — mandi prices.
+- financial — {} — loans/KCC/insurance.
+
+Rules: At most 2 tools; fewer is better. Use smalltalk only for pure greetings/thanks/bye with NO farming topic. Use clarify only when intent is unknown. Use farmer_profile only to disambiguate — do not invent facts.
+
+CHAT HISTORY (if non-empty): resolve references only; do not infer tool params unless current query refers clearly.
+"""
+
 
 def _heuristic_plan(req: AgentRequest) -> List[Dict[str, Any]]:
     """Emergency fallback only when the LLM planner call fails (network/parse error)."""
@@ -230,6 +275,70 @@ def _heuristic_plan(req: AgentRequest) -> List[Dict[str, Any]]:
     if "disease" in intent or any(k in text for k in ("disease", "pest", "yellow", "rust", "rog", "रोग")):
         return [{"tool": "vision", "params": {"use_image": has_image}}]
     return [{"tool": "general_qa", "params": {"query": req.query.text or ""}}]
+
+
+_TOOL_REQUIRED_KEYWORDS = frozenset(
+    {
+        "weather",
+        "mausam",
+        "rain",
+        "barish",
+        "baarish",
+        "forecast",
+        "बारिश",
+        "मौसम",
+        "price",
+        "mandi",
+        "bhav",
+        "rate",
+        "मंडी",
+        "scheme",
+        "yojana",
+        "subsidy",
+        "pm-kisan",
+        "kcc",
+        "योजना",
+        "loan",
+        "insurance",
+        "bima",
+        "बीमा",
+    }
+)
+
+
+def _is_nontool_query(req: AgentRequest, chat_history: List[Dict[str, Any]]) -> bool:
+    """True when we can skip planner + tools and answer with direct LLM."""
+    if req.query.image_ref:
+        return False
+    text = (req.query.text or "").lower()
+    return not any(k in text for k in _TOOL_REQUIRED_KEYWORDS)
+
+
+def _build_direct_llm_messages(
+    req: AgentRequest,
+    twin: Optional[FarmerTwin],
+    chat_history: List[Dict[str, Any]],
+    *,
+    voice_mode: bool,
+) -> List[Dict[str, Any]]:
+    farmer_profile = _farmer_profile_for_llm(twin)
+    name_s = (twin.name.strip() if twin and twin.name else "") or "Farmer"
+    payload = json.dumps(
+        {
+            "farmer_profile": farmer_profile,
+            "chat_history": chat_history or [],
+            "user_query": req.query.text or "",
+        },
+        ensure_ascii=False,
+    )
+    if voice_mode:
+        base = _DIRECT_LLM_PROMPT_VOICE.format(name=name_s)
+    else:
+        base = _DIRECT_LLM_PROMPT_FULL
+    return [
+        {"role": "system", "content": _system_with_language_rule(base)},
+        {"role": "user", "content": payload},
+    ]
 
 
 def _normalize_tool_plan(raw_tools: Any, settings: Settings) -> List[Dict[str, Any]]:
@@ -284,8 +393,13 @@ async def _plan_with_llm(
         },
         ensure_ascii=False,
     )
+    planner_sys = (
+        _PLANNER_PROMPT_VOICE
+        if (req.context.device_intent or "").lower() == "voice"
+        else _PLANNER_PROMPT
+    )
     messages = [
-        {"role": "system", "content": _PLANNER_PROMPT},
+        {"role": "system", "content": planner_sys},
         {"role": "user", "content": user},
     ]
     try:
@@ -463,15 +577,40 @@ async def _dispatch_one(
 async def _run_tools(
     tools: List[Dict[str, Any]], ctx: _DispatchContext
 ) -> tuple[Dict[str, Any], List[str]]:
-    results: Dict[str, Any] = {}
-    trace: List[str] = []
-    for i, step in enumerate(tools):
+    valid_steps: List[tuple[str, Dict[str, Any]]] = []
+    for step in tools:
         name = step.get("tool") or step.get("name")
         if not name:
             continue
         params = step.get("params") or {}
-        trace.append(name)
-        results[f"{name}_{i}"] = await _dispatch_one(name, params, ctx)
+        valid_steps.append((str(name), params if isinstance(params, dict) else {}))
+
+    if not valid_steps:
+        return {}, []
+
+    async def _wrapped(i: int, name: str, params: Dict[str, Any]) -> tuple[int, str, Dict[str, Any]]:
+        res = await _dispatch_one(name, params, ctx)
+        return i, name, res
+
+    gathered = await asyncio.gather(
+        *[_wrapped(i, n, p) for i, (n, p) in enumerate(valid_steps)],
+        return_exceptions=True,
+    )
+
+    results: Dict[str, Any] = {}
+    trace: List[str] = []
+    for i, item in enumerate(gathered):
+        name = valid_steps[i][0]
+        if isinstance(item, KrishiHTTPException):
+            raise item
+        if isinstance(item, Exception):
+            logger.warning("Parallel tool %s failed: %s", name, item)
+            trace.append(name)
+            results[f"{name}_{i}"] = {"error": str(item), "tool": name}
+            continue
+        idx, nm, res = item  # type: ignore[misc]
+        trace.append(nm)
+        results[f"{nm}_{idx}"] = res
     return results, trace
 
 
@@ -497,13 +636,19 @@ async def node_plan(state: AgentState) -> Dict[str, Any]:
     req = state["request"]
     prefer_local = bool(state.get("prefer_local"))
     chat_hist = await _load_chat_history(req, settings)
+    model_used = settings.ollama_model if prefer_local else settings.ai_studio_model
+    if _is_nontool_query(req, chat_hist):
+        return {
+            "tool_plan": [{"tool": DIRECT_LLM_TOOL, "params": {}}],
+            "model_used": model_used,
+            "chat_history": chat_hist,
+        }
     plan = await _plan_with_llm(
         req,
         prefer_local=prefer_local,
         settings=settings,
         chat_history=chat_hist,
     )
-    model_used = settings.ollama_model if prefer_local else settings.ai_studio_model
     return {"tool_plan": plan, "model_used": model_used, "chat_history": chat_hist}
 
 
@@ -568,6 +713,37 @@ async def node_smalltalk(state: AgentState) -> Dict[str, Any]:
         "tool_trace": ["smalltalk"],
         "safety_flags": [],
         "confidence_score": 1.0,
+        "model_used": model_used,
+    }
+
+
+async def node_direct_llm(state: AgentState) -> Dict[str, Any]:
+    """Single-pass LLM answer without tools or synthesis (used by ``run_graph``)."""
+    settings = get_settings()
+    req = state["request"]
+    prefer_local = bool(state.get("prefer_local"))
+    twin = await resolve_farmer_twin(req.farmer_id, req.context.connectivity, settings)
+    voice_mode = (req.context.device_intent or "").lower() == "voice"
+    messages = _build_direct_llm_messages(
+        req,
+        twin,
+        state.get("chat_history") or [],
+        voice_mode=voice_mode,
+    )
+    model_used = settings.ollama_model if prefer_local else settings.ai_studio_model
+    try:
+        draft = await generate(messages, prefer_local=prefer_local, settings=settings)
+    except Exception:
+        draft = (
+            "माफ़ कीजिए, अभी जवाब नहीं बना पाया। कृपया दोबारा कोशिश करें। "
+            "/ Sorry, I couldn't answer right now. Please try again."
+        )
+    return {
+        "draft_text": draft,
+        "tool_results": {},
+        "tool_trace": ["direct_llm"],
+        "safety_flags": [],
+        "confidence_score": 0.85,
         "model_used": model_used,
     }
 
@@ -706,6 +882,8 @@ def _route_after_plan(state: AgentState) -> str:
         return "clarify"
     if plan and plan[0].get("tool") == SMALLTALK_TOOL:
         return "smalltalk"
+    if plan and plan[0].get("tool") == DIRECT_LLM_TOOL:
+        return "direct_llm"
     return "tools"
 
 
@@ -715,6 +893,7 @@ def build_graph():
     g.add_node("plan", node_plan)
     g.add_node("clarify", node_clarify)
     g.add_node("smalltalk", node_smalltalk)
+    g.add_node("direct_llm", node_direct_llm)
     g.add_node("tools", node_tools)
     g.add_node("synthesize", node_synthesize)
     g.add_node("safety", node_safety)
@@ -724,10 +903,16 @@ def build_graph():
     g.add_conditional_edges(
         "plan",
         _route_after_plan,
-        {"clarify": "clarify", "smalltalk": "smalltalk", "tools": "tools"},
+        {
+            "clarify": "clarify",
+            "smalltalk": "smalltalk",
+            "direct_llm": "direct_llm",
+            "tools": "tools",
+        },
     )
     g.add_edge("clarify", "respond")
     g.add_edge("smalltalk", "safety")
+    g.add_edge("direct_llm", "safety")
     g.add_edge("tools", "synthesize")
     g.add_edge("synthesize", "safety")
     g.add_edge("safety", "respond")
@@ -771,17 +956,22 @@ async def run_graph_stream(
 
     yield ("start", {"messageId": message_id})
     yield ("data-stage", {"data": {"stage": "routing"}})
+    yield ("data-tool", {"data": {"tool": "routing", "status": "started"}})
 
     state: AgentState = {"request": req}  # type: ignore[assignment]
     state.update(await node_route(state))
-    yield ("data-stage", {"data": {"stage": "planning"}})
+    yield ("data-tool", {"data": {"tool": "routing", "status": "done"}})
+
+    # Plan silently so voice/UI never show a "planning" filler before the route is known.
     state.update(await node_plan(state))
 
     plan_early = state.get("tool_plan") or []
     if plan_early and plan_early[0].get("tool") == CLARIFY_TOOL:
         yield ("data-stage", {"data": {"stage": "clarify"}})
+        yield ("data-tool", {"data": {"tool": "clarify", "status": "started"}})
         state.update(await node_clarify(state))
         clarify_text = state.get("draft_text") or ""
+        yield ("data-tool", {"data": {"tool": "clarify", "status": "done"}})
 
         yield ("start-step", {})
         yield ("text-start", {"id": text_id})
@@ -826,6 +1016,7 @@ async def run_graph_stream(
 
     if plan_early and plan_early[0].get("tool") == SMALLTALK_TOOL:
         yield ("data-stage", {"data": {"stage": "smalltalk"}})
+        yield ("data-tool", {"data": {"tool": "smalltalk", "status": "started"}})
         messages_st, model_used_st = await _build_smalltalk_llm_messages(state)
         prefer_local_st = bool(state.get("prefer_local"))
 
@@ -833,9 +1024,7 @@ async def run_graph_stream(
         yield ("text-start", {"id": text_id})
 
         draft_acc_st = ""
-        smalltalk_fb = (
-            "Namaste! Aaj main aapki kya madad kar sakta hoon?"
-        )
+        smalltalk_fb = "Namaste! Aaj main aapki kya madad kar sakta hoon?"
         try:
             async for chunk in generate_stream(
                 messages_st,
@@ -851,6 +1040,7 @@ async def run_graph_stream(
 
         yield ("text-end", {"id": text_id})
         yield ("finish-step", {})
+        yield ("data-tool", {"data": {"tool": "smalltalk", "status": "done"}})
 
         state["draft_text"] = draft_acc_st
         state["model_used"] = model_used_st
@@ -858,7 +1048,9 @@ async def run_graph_stream(
         state["tool_trace"] = ["smalltalk"]
         state["safety_flags"] = []
 
+        yield ("data-tool", {"data": {"tool": "safety", "status": "started"}})
         state.update(await node_safety(state))
+        yield ("data-tool", {"data": {"tool": "safety", "status": "done"}})
         state.update(await node_fallback_hint(state))
 
         rq_st = req
@@ -893,10 +1085,101 @@ async def run_graph_stream(
         yield ("__done__", None)
         return
 
+    if plan_early and plan_early[0].get("tool") == DIRECT_LLM_TOOL:
+        yield ("data-stage", {"data": {"stage": "direct_llm"}})
+        yield ("data-tool", {"data": {"tool": "thinking", "status": "started"}})
+        twin_dl = await resolve_farmer_twin(req.farmer_id, req.context.connectivity, settings)
+        voice_mode = (req.context.device_intent or "").lower() == "voice"
+        messages_dl = _build_direct_llm_messages(
+            req,
+            twin_dl,
+            state.get("chat_history") or [],
+            voice_mode=voice_mode,
+        )
+        prefer_local_dl = bool(state.get("prefer_local"))
+        model_used_dl = settings.ollama_model if prefer_local_dl else settings.ai_studio_model
+
+        yield ("start-step", {})
+        yield ("text-start", {"id": text_id})
+        draft_dl = ""
+        try:
+            async for chunk in generate_stream(
+                messages_dl,
+                prefer_local=prefer_local_dl,
+                settings=settings,
+            ):
+                draft_dl += chunk
+                yield ("text-delta", {"id": text_id, "delta": chunk})
+        except Exception as e:
+            logger.exception("Streaming direct_llm failed: %s", e)
+            fb = (
+                "Sorry, I couldn't answer right now. Please try again. "
+                "माफ़ कीजिए, अभी जवाब नहीं बना पाया।"
+            )
+            draft_dl = fb
+            yield ("text-delta", {"id": text_id, "delta": fb})
+
+        yield ("text-end", {"id": text_id})
+        yield ("finish-step", {})
+        yield ("data-tool", {"data": {"tool": "thinking", "status": "done"}})
+
+        state["draft_text"] = draft_dl
+        state["model_used"] = model_used_dl
+        state["tool_results"] = {}
+        state["tool_trace"] = ["direct_llm"]
+        state["safety_flags"] = []
+
+        yield ("data-tool", {"data": {"tool": "safety", "status": "started"}})
+        state.update(await node_safety(state))
+        yield ("data-tool", {"data": {"tool": "safety", "status": "done"}})
+        state.update(await node_fallback_hint(state))
+
+        rq_dl = req
+        resp_dl = build(
+            draft_text=state.get("draft_text") or "",
+            tool_results={},
+            tool_trace=list(state.get("tool_trace") or []),
+            data_source=str(state.get("data_source") or "live"),
+            language=rq_dl.query.language,
+            safety_flags=list(state.get("safety_flags") or []),
+            model_used=str(state.get("model_used") or settings.ai_studio_model),
+            confidence_score=float(state.get("confidence_score") or 0.85),
+            fallback_hint=state.get("fallback_hint"),  # type: ignore[arg-type]
+        )
+        resp_dl.conversation_id = rq_dl.conversation_id
+        try:
+            await persist_log_query(
+                rq_dl.query.text,
+                resp_dl.structured.kind,
+                resp_dl.text[:2000],
+                resp_dl.data_source,
+                rq_dl.context.connectivity,
+                farmer_id=rq_dl.farmer_id,
+                conversation_id=rq_dl.conversation_id,
+                settings=settings,
+            )
+        except Exception as e:
+            logger.warning("log_query failed: %s", e)
+
+        yield ("data-metadata", _agent_response_metadata(resp_dl))
+        yield ("finish", {})
+        yield ("__done__", None)
+        return
+
     yield ("data-stage", {"data": {"stage": "tools"}})
+    planned_tools = [
+        step.get("tool") or step.get("name")
+        for step in plan_early
+        if step.get("tool") or step.get("name")
+    ]
+    for tn in planned_tools:
+        yield ("data-tool", {"data": {"tool": str(tn), "status": "started"}})
     state.update(await node_tools(state))
+    for tn in planned_tools:
+        yield ("data-tool", {"data": {"tool": str(tn), "status": "done"}})
 
     yield ("data-stage", {"data": {"stage": "synthesizing"}})
+    yield ("data-tool", {"data": {"tool": "synthesizing", "status": "started"}})
     rq = req
     twin_syn = await resolve_farmer_twin(rq.farmer_id, rq.context.connectivity, settings)
     payload = json.dumps(
@@ -939,11 +1222,14 @@ async def run_graph_stream(
 
     yield ("text-end", {"id": text_id})
     yield ("finish-step", {})
+    yield ("data-tool", {"data": {"tool": "synthesizing", "status": "done"}})
 
     state["draft_text"] = draft_acc
     state["model_used"] = model_used
 
+    yield ("data-tool", {"data": {"tool": "safety", "status": "started"}})
     state.update(await node_safety(state))
+    yield ("data-tool", {"data": {"tool": "safety", "status": "done"}})
     state.update(await node_fallback_hint(state))
 
     resp = build(
