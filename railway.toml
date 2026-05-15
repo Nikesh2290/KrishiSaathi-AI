@@ -1,0 +1,24 @@
+# LiveKit voice worker for Railway (separate service from Hugging Face API).
+#
+# 1. New Project → Deploy from GitHub → select this repo.
+# 2. Service Settings → disable Serverless; do not assign a public domain.
+# 3. Variables (secrets): LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET,
+#    DEEPGRAM_API_KEY, KRISHI_API_BASE_URL=https://<your-space>.hf.space
+# 4. Optional: DEEPGRAM_TTS_MODEL, DEEPGRAM_STT_LANGUAGE, VOICE_DEFAULT_FARMER_ID
+#
+# Hugging Face Space must also set LIVEKIT_* for POST /api/v1/voice/token.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile.voice"
+watchPatterns = [
+  "voice_agent/**",
+  "requirements.txt",
+  "Dockerfile.voice",
+  "railway.toml",
+]
+
+[deploy]
+startCommand = "python -m voice_agent.worker start"
+restartPolicyType = "ALWAYS"
+restartPolicyMaxRetries = 10
