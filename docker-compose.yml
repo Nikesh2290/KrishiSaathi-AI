@@ -14,8 +14,9 @@ services:
       - krishi-data:/data
 
   voice-agent:
-    build: .
-    command: ["python", "-m", "voice_agent.worker", "start"]
+    build:
+      context: .
+      dockerfile: Dockerfile.voice
     environment:
       - DATABASE_PATH=/data/krishisaathi.db
       - CHROMA_PATH=/data/chroma
