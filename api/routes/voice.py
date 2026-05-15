@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException
 from livekit.api import AccessToken, CreateAgentDispatchRequest, LiveKitAPI, VideoGrants
 
 from config.settings import get_settings
+from db.persistence import resolve_farmer_twin
 from models.voice import VoiceTokenRequest, VoiceTokenResponse
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,14 @@ async def post_voice_token(body: VoiceTokenRequest) -> VoiceTokenResponse:
     room = body.room_name or f"krishi-{_sanitize_room_fragment(body.farmer_id)}-{uuid.uuid4().hex[:10]}"
     identity = body.participant_identity or f"farmer-{body.farmer_id[:8]}"
 
+    display_name = "Farmer"
+    try:
+        twin_v = await resolve_farmer_twin(body.farmer_id, "online", settings)
+        if twin_v and twin_v.name.strip():
+            display_name = twin_v.name.strip()[:64]
+    except Exception as exc:
+        logger.debug("resolve_farmer_twin for voice display name: %s", exc)
+
     meta = {
         "farmer_id": body.farmer_id,
         "conversation_id": body.conversation_id,
@@ -47,7 +56,7 @@ async def post_voice_token(body: VoiceTokenRequest) -> VoiceTokenResponse:
         token = (
             AccessToken(settings.livekit_api_key, settings.livekit_api_secret)
             .with_identity(identity)
-            .with_name("Farmer")
+            .with_name(display_name)
             .with_metadata(json.dumps(meta, ensure_ascii=False))
             .with_ttl(timedelta(seconds=int(settings.voice_token_ttl_seconds)))
             .with_grants(

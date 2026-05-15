@@ -121,4 +121,6 @@ await fetch(`${BASE}/api/v1/query/image`, { method: "POST", body: fd });
 2. Use `@livekit/react-native` (or the web client SDK) with `serverUrl`, `token`, and `room` from the response. Publish microphone audio for the voice session.
 3. Run the backend voice worker separately (Docker Compose service `voice-agent`, or `python -m voice_agent.worker start` locally) so an agent joins the same room, transcribes speech, calls `POST /api/v1/query/stream`, and plays TTS.
 
+**Welcome on join:** The worker speaks a **one-time personalized welcome** (using the farmer twin profile when available) right after the LiveKit session starts. **Do not** play a duplicate in-app greeting overlay at the same time — let the agent own the opening so users are not interrupted by two voices.
+
 Worker environment: `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `DEEPGRAM_API_KEY` (STT + TTS), optional `DEEPGRAM_TTS_MODEL`, `KRISHI_API_BASE_URL` (in Compose use `http://api:7860`).

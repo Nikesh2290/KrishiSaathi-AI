@@ -55,6 +55,37 @@ def _consume_buffer(buf: str) -> tuple[str, str, list[str], dict[str, Any] | Non
     return out_buf, status, pieces, last_meta
 
 
+def _consume_buffer_events(buf: str) -> tuple[str, str, list[dict[str, Any]]]:
+    """Parse complete SSE frames into typed JSON objects.
+
+    Returns (remainder, status, events).
+    status: ``\"\"`` | ``\"done\"`` | ``\"error\"``.
+    """
+    events: list[dict[str, Any]] = []
+    out_buf = buf
+    status = ""
+    while "\n\n" in out_buf:
+        block, out_buf = out_buf.split("\n\n", 1)
+        data_str = _sse_block_to_data_str(block)
+        if not data_str:
+            continue
+        if data_str == "[DONE]":
+            status = "done"
+            break
+        try:
+            obj = json.loads(data_str)
+        except json.JSONDecodeError:
+            logger.warning("bad sse json: %s", data_str[:200])
+            continue
+        if not isinstance(obj, dict):
+            continue
+        events.append(obj)
+        if obj.get("type") == "error":
+            status = "error"
+            break
+    return out_buf, status, events
+
+
 async def collect_from_query_stream(
     client: httpx.AsyncClient,
     *,
@@ -103,3 +134,39 @@ async def collect_text_from_query_stream(
 ) -> str:
     text, _ = await collect_from_query_stream(client, api_base=api_base, payload=payload)
     return text
+
+
+async def iter_query_stream_events(
+    client: httpx.AsyncClient,
+    *,
+    api_base: str,
+    payload: dict[str, Any],
+):
+    """Yield each SSE JSON event as it arrives (streaming).
+
+    Skips non-dict payloads. Stops after ``[DONE]`` or an ``error`` frame.
+    """
+    url = f"{api_base.rstrip('/')}/api/v1/query/stream"
+    buf = ""
+    async with client.stream(
+        "POST",
+        url,
+        json=payload,
+        headers={"Accept": "text/event-stream"},
+        timeout=120.0,
+    ) as r:
+        r.raise_for_status()
+        async for line in r.aiter_lines():
+            if line is None:
+                continue
+            buf += line + "\n"
+            buf, status, objs = _consume_buffer_events(buf)
+            for obj in objs:
+                yield obj
+            if status == "done":
+                return
+            if status == "error":
+                return
+        buf, status, objs = _consume_buffer_events(buf)
+        for obj in objs:
+            yield obj

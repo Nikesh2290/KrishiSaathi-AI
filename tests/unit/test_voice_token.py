@@ -53,6 +53,11 @@ def test_voice_token_mints_jwt(monkeypatch):
     monkeypatch.setenv("LIVEKIT_API_KEY", "testkey")
     monkeypatch.setenv("LIVEKIT_API_SECRET", "0123456789abcdef0123456789abcdef")
     monkeypatch.setattr("api.routes.voice.LiveKitAPI", _FakeLiveKitAPI)
+
+    async def _no_twin(*_a, **_k):
+        return None
+
+    monkeypatch.setattr("api.routes.voice.resolve_farmer_twin", _no_twin)
     get_settings.cache_clear()
 
     from api.main import create_app

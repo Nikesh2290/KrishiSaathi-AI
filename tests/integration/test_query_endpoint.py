@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -104,3 +105,105 @@ def test_query_stream_mocked(monkeypatch, client):
     assert "text" not in payloads[7]["data"]
     assert payloads[8] == {"type": "finish"}
     assert payloads[-1] == "[DONE]"
+
+
+def _sse_payloads(response_iter_lines):
+    payloads: list[object] = []
+    buffer = ""
+    for line in response_iter_lines:
+        if line is None:
+            continue
+        buffer += line + "\n"
+        while "\n\n" in buffer:
+            block, buffer = buffer.split("\n\n", 1)
+            data_lines: list[str] = []
+            for part in block.strip().split("\n"):
+                if part.startswith("data:"):
+                    data_lines.append(part.removeprefix("data:").strip())
+            data_str = "".join(data_lines).strip()
+            if data_str == "[DONE]":
+                payloads.append("[DONE]")
+            else:
+                payloads.append(json.loads(data_str))
+    return payloads
+
+
+def test_smalltalk_sse_personalized_and_tool_events(client, monkeypatch):
+    """Tier 1: farmer twin name + data-tool smalltalk frames."""
+    from models.farmer import FarmerTwin
+
+    monkeypatch.setattr(
+        "api.routes.query.resolve_farmer_twin",
+        AsyncMock(return_value=FarmerTwin(farmer_id="f1", name="Ramesh")),
+    )
+    body = {
+        "farmer_id": "f1",
+        "query": {"text": "hello", "language": "en"},
+        "context": {"connectivity": "online", "device_intent": "general", "location": {}},
+    }
+    with client.stream(
+        "POST",
+        "/api/v1/query/stream",
+        json=body,
+        headers={"Accept": "text/event-stream"},
+    ) as r:
+        assert r.status_code == 200
+        payloads = _sse_payloads(r.iter_lines())
+
+    tools_smalltalk = [p for p in payloads if isinstance(p, dict) and p.get("type") == "data-tool" and p.get("data", {}).get("tool") == "smalltalk"]
+    assert tools_smalltalk and tools_smalltalk[0]["data"]["status"] == "started"
+
+    deltas = [
+        p.get("delta", "")
+        for p in payloads
+        if isinstance(p, dict) and p.get("type") == "text-delta"
+    ]
+    full_text = "".join(deltas)
+    assert "Ramesh" in full_text
+
+
+def test_direct_llm_stream_parallel(monkeypatch, client):
+    """Tier 2: general query skips planner tools path when mocked LLM streams."""
+
+    async def fake_gs(_messages, prefer_local=False, settings=None):
+        yield "Paris "
+        yield "is the capital."
+
+    monkeypatch.setattr("agent.graph.generate_stream", fake_gs)
+
+    body = {
+        "farmer_id": "f1",
+        "query": {"text": "capital of France in one line", "language": "en"},
+        "context": {"connectivity": "online", "device_intent": "general", "location": {}},
+    }
+    with client.stream(
+        "POST",
+        "/api/v1/query/stream",
+        json=body,
+        headers={"Accept": "text/event-stream"},
+    ) as r:
+        assert r.status_code == 200
+        payloads = _sse_payloads(r.iter_lines())
+
+    meta = next(
+        p
+        for p in payloads
+        if isinstance(p, dict) and p.get("type") == "data-metadata"
+    )
+    assert meta["data"]["tool_trace"] == ["direct_llm"]
+
+    thinking_evts = [
+        p
+        for p in payloads
+        if isinstance(p, dict)
+        and p.get("type") == "data-tool"
+        and p.get("data", {}).get("tool") == "thinking"
+    ]
+    assert thinking_evts and thinking_evts[0]["data"]["status"] == "started"
+
+    deltas = "".join(
+        p.get("delta", "")
+        for p in payloads
+        if isinstance(p, dict) and p.get("type") == "text-delta"
+    )
+    assert "Paris" in deltas
