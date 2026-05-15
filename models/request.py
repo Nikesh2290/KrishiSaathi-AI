@@ -11,7 +11,7 @@ class QueryPayload(BaseModel):
     text: str = ""
     voice_b64: Optional[str] = None
     image_ref: Optional[str] = None
-    language: str = "hi"
+    language: str = "en"
 
 
 class ContextPayload(BaseModel):

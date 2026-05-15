@@ -31,7 +31,7 @@ class AgentResponse(BaseModel):
     tool_trace: List[str] = Field(default_factory=list)
     safety_flags: List[str] = Field(default_factory=list)
     fallback_hint: Optional[FallbackHint] = None
-    language: str = "hi"
+    language: str = "en"
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     def model_dump_json_safe(self) -> dict:

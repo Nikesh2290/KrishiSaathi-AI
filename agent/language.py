@@ -84,6 +84,6 @@ def filler_lang_key(style: LanguageStyle, session_locale: str) -> str:
     if style == "en":
         return "en"
     if style in ("hi", "hi-Latn", "mixed"):
-        base = (session_locale or "hi").split("-", 1)[0].lower()
+        base = (session_locale or "en").split("-", 1)[0].lower()
         return base if base in ("hi", "en") else "hi"
     return "hi"

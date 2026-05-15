@@ -26,4 +26,4 @@ class FarmerTwin(BaseModel):
     location: Location = Field(default_factory=Location)
     land: Land = Field(default_factory=Land)
     current_crops: List[str] = Field(default_factory=list)
-    preferred_language: str = "hi"
+    preferred_language: str = "en"
