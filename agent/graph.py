@@ -13,7 +13,7 @@ import re
 from dataclasses import dataclass
 from uuid import uuid4
 from collections.abc import AsyncIterator
-from typing import Annotated, Any, Dict, List, Optional, TypedDict
+from typing import Annotated, Any, Dict, List, Optional, TypedDict, cast
 
 from models.response import AgentResponse
 
@@ -23,6 +23,8 @@ from agent.connectivity_router import data_source_for_route, resolve_route
 from agent.gemma_client import generate, generate_stream
 from agent.history import build_chat_history_context
 from config.settings import Settings, get_settings
+from cache import context_builder
+from cache.redis_client import get_redis_for_request
 from db.persistence import persist_log_query, resolve_farmer_twin
 from db.sqlite_client import get_last_n_turns
 from models.errors import KrishiHTTPException
@@ -147,6 +149,20 @@ class AgentState(TypedDict, total=False):
     confidence_score: float
     model_used: str
     fallback_hint: Optional[str]
+    prefetched_farmer_twin: Optional[FarmerTwin]
+    prefetched_chat_history: List[Dict[str, Any]]
+    redis_context_hit: bool
+
+
+async def _twin_for_graph(
+    state: AgentState,
+    req: AgentRequest,
+    settings: Settings,
+) -> Optional[FarmerTwin]:
+    t = state.get("prefetched_farmer_twin")
+    if t is not None:
+        return t
+    return await resolve_farmer_twin(req.farmer_id, req.context.connectivity, settings)
 
 
 def _farmer_profile_for_llm(twin: Optional[FarmerTwin]) -> Optional[Dict[str, Any]]:
@@ -379,8 +395,13 @@ async def _plan_with_llm(
     settings: Settings,
     *,
     chat_history: Optional[List[Dict[str, Any]]] = None,
+    twin_override: Optional[FarmerTwin] = None,
 ) -> List[Dict[str, Any]]:
-    twin = await resolve_farmer_twin(req.farmer_id, req.context.connectivity, settings)
+    twin = twin_override if twin_override is not None else await resolve_farmer_twin(
+        req.farmer_id,
+        req.context.connectivity,
+        settings,
+    )
     twin_payload = _farmer_profile_for_llm(twin)
     hist = chat_history if chat_history is not None else []
     user = json.dumps(
@@ -434,6 +455,7 @@ class _DispatchContext:
     prefer_local: bool
     offline: bool
     settings: Settings
+    cached_farmer_twin: Optional[FarmerTwin] = None
 
 
 async def _with_timeout(coro, seconds: float):
@@ -461,7 +483,11 @@ async def _dispatch_one(
 ) -> Dict[str, Any]:
     settings = ctx.settings
     req = ctx.request
-    twin = await resolve_farmer_twin(req.farmer_id, req.context.connectivity, settings)
+    twin = (
+        ctx.cached_farmer_twin
+        if ctx.cached_farmer_twin is not None
+        else await resolve_farmer_twin(req.farmer_id, req.context.connectivity, settings)
+    )
     timeout = _dispatch_timeout(settings, name, ctx)
 
     try:
@@ -477,7 +503,10 @@ async def _dispatch_one(
                     asyncio.to_thread(climate_offline.offline_weather, str(dist), crop),
                     timeout,
                 )
-            return await _with_timeout(climate_engine.get_weather(lat, lng, crop), timeout)
+            return await _with_timeout(
+                climate_engine.get_weather(lat, lng, crop, settings),
+                timeout,
+            )
 
         if name == "vision":
             image_ref = req.query.image_ref
@@ -623,19 +652,55 @@ async def node_route(state: AgentState) -> Dict[str, Any]:
     route = await resolve_route(req, settings)
     ds = data_source_for_route(route, req)
     offline = ds == "offline"
-    return {
+    extras: Dict[str, Any] = {}
+
+    cid = (req.conversation_id or "").strip()
+    fid = (req.farmer_id or "").strip()
+    if (
+        not offline
+        and settings.redis_configured
+        and cid
+        and fid
+        and req.context.connectivity.lower() != "offline"
+    ):
+        rdc = get_redis_for_request(settings)
+        if rdc is not None:
+            try:
+                loaded = await context_builder.load_route_prefetch(rdc, fid, cid, settings)
+                if loaded:
+                    extras.update(loaded)
+            except Exception as e:
+                logger.warning("redis route prefetch skipped: %s", e)
+
+    base = {
         "route": route,
         "data_source": ds,
         "prefer_local": offline,
         "offline": offline,
     }
+    base.update(extras)
+    return base
 
 
 async def node_plan(state: AgentState) -> Dict[str, Any]:
     settings = get_settings()
     req = state["request"]
     prefer_local = bool(state.get("prefer_local"))
-    chat_hist = await _load_chat_history(req, settings)
+    redis_hit = bool(state.get("redis_context_hit"))
+
+    if redis_hit:
+        chat_hist = list(state.get("prefetched_chat_history") or [])
+        twin_ov_raw = cast(Optional[FarmerTwin], state.get("prefetched_farmer_twin"))
+        if twin_ov_raw is not None:
+            twin_ov_plan = twin_ov_raw
+        else:
+            twin_ov_plan = await resolve_farmer_twin(
+                req.farmer_id, req.context.connectivity, settings
+            )
+    else:
+        chat_hist = await _load_chat_history(req, settings)
+        twin_ov_plan = None
+
     model_used = settings.ollama_model if prefer_local else settings.ai_studio_model
     if _is_nontool_query(req, chat_hist):
         return {
@@ -648,6 +713,7 @@ async def node_plan(state: AgentState) -> Dict[str, Any]:
         prefer_local=prefer_local,
         settings=settings,
         chat_history=chat_hist,
+        twin_override=twin_ov_plan,
     )
     return {"tool_plan": plan, "model_used": model_used, "chat_history": chat_hist}
 
@@ -678,7 +744,7 @@ async def _build_smalltalk_llm_messages(state: AgentState) -> tuple[list[Dict[st
     settings = get_settings()
     req = state["request"]
     prefer_local = bool(state.get("prefer_local"))
-    twin = await resolve_farmer_twin(req.farmer_id, req.context.connectivity, settings)
+    twin = await _twin_for_graph(state, req, settings)
     farmer_profile = _farmer_profile_for_llm(twin)
     payload = json.dumps(
         {
@@ -722,8 +788,8 @@ async def node_direct_llm(state: AgentState) -> Dict[str, Any]:
     settings = get_settings()
     req = state["request"]
     prefer_local = bool(state.get("prefer_local"))
-    twin = await resolve_farmer_twin(req.farmer_id, req.context.connectivity, settings)
     voice_mode = (req.context.device_intent or "").lower() == "voice"
+    twin = await _twin_for_graph(state, req, settings)
     messages = _build_direct_llm_messages(
         req,
         twin,
@@ -751,11 +817,15 @@ async def node_direct_llm(state: AgentState) -> Dict[str, Any]:
 async def node_tools(state: AgentState) -> Dict[str, Any]:
     settings = get_settings()
     req = state["request"]
+    twin_cache = None
+    if state.get("redis_context_hit"):
+        twin_cache = cast(Optional[FarmerTwin], state.get("prefetched_farmer_twin"))
     ctx = _DispatchContext(
         request=req,
         prefer_local=bool(state.get("prefer_local")),
         offline=bool(state.get("offline")),
         settings=settings,
+        cached_farmer_twin=twin_cache,
     )
     results, trace = await _run_tools(state.get("tool_plan") or [], ctx)
     return {"tool_results": results, "tool_trace": trace}
@@ -764,7 +834,7 @@ async def node_tools(state: AgentState) -> Dict[str, Any]:
 async def node_synthesize(state: AgentState) -> Dict[str, Any]:
     settings = get_settings()
     req = state["request"]
-    twin = await resolve_farmer_twin(req.farmer_id, req.context.connectivity, settings)
+    twin = await _twin_for_graph(state, req, settings)
     farmer_profile = _farmer_profile_for_llm(twin)
     payload = json.dumps(
         {
@@ -827,9 +897,7 @@ async def node_safety(state: AgentState) -> Dict[str, Any]:
         and not state.get("_escalated")  # type: ignore[typeddict-item]
     ):
         rq_esc = state["request"]
-        twin_esc = await resolve_farmer_twin(
-            rq_esc.farmer_id, rq_esc.context.connectivity, settings
-        )
+        twin_esc = await _twin_for_graph(state, rq_esc, settings)
         payload = json.dumps(
             {
                 "farmer_profile": _farmer_profile_for_llm(twin_esc),
@@ -854,6 +922,20 @@ async def node_safety(state: AgentState) -> Dict[str, Any]:
             model_used = settings.ai_studio_model_heavy
             trace.append("safety_escalation")
             score = max(score, 0.82)
+            if settings.qstash_configured:
+                try:
+                    from cache import qstash_client as _qsp
+
+                    await _qsp.enqueue_escalate_llm(
+                        settings,
+                        {
+                            "conversation_id": rq_esc.conversation_id,
+                            "farmer_id": rq_esc.farmer_id,
+                            "hint": "safety_escalation_completed",
+                        },
+                    )
+                except Exception as _qe:
+                    logger.debug("QStash escalate notify skipped: %s", _qe)
         except Exception as e:
             logger.warning("Escalation to heavy model failed: %s", e)
 
@@ -1088,7 +1170,7 @@ async def run_graph_stream(
     if plan_early and plan_early[0].get("tool") == DIRECT_LLM_TOOL:
         yield ("data-stage", {"data": {"stage": "direct_llm"}})
         yield ("data-tool", {"data": {"tool": "thinking", "status": "started"}})
-        twin_dl = await resolve_farmer_twin(req.farmer_id, req.context.connectivity, settings)
+        twin_dl = await _twin_for_graph(state, req, settings)
         voice_mode = (req.context.device_intent or "").lower() == "voice"
         messages_dl = _build_direct_llm_messages(
             req,
@@ -1181,7 +1263,7 @@ async def run_graph_stream(
     yield ("data-stage", {"data": {"stage": "synthesizing"}})
     yield ("data-tool", {"data": {"tool": "synthesizing", "status": "started"}})
     rq = req
-    twin_syn = await resolve_farmer_twin(rq.farmer_id, rq.context.connectivity, settings)
+    twin_syn = await _twin_for_graph(state, rq, settings)
     payload = json.dumps(
         {
             "farmer_profile": _farmer_profile_for_llm(twin_syn),

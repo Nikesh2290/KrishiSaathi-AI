@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 import httpx
 from fastapi import APIRouter, Query
 
-from config.settings import get_settings
+from config.settings import Settings, get_settings
 from db.persistence import resolve_farmer_twin
 from db.sqlite_client import get_weather_cache, set_weather_cache
 from models.errors import ErrorCode, KrishiHTTPException
@@ -29,9 +29,14 @@ def _iso_ist(ts: int) -> str:
     return datetime.fromtimestamp(ts, tz=_IST).isoformat()
 
 
-async def _get_weather_widget_timeout(lat: float, lng: float, timeout_s: float) -> Dict[str, Any]:
+async def _get_weather_widget_timeout(
+    lat: float,
+    lng: float,
+    timeout_s: float,
+    settings: Settings,
+) -> Dict[str, Any]:
     return await asyncio.wait_for(
-        climate_engine.get_weather_widget(lat, lng),
+        climate_engine.get_weather_widget(lat, lng, settings),
         timeout=timeout_s,
     )
 
@@ -85,7 +90,7 @@ async def get_farmer_home_weather(
             )
 
     try:
-        inner = await _get_weather_widget_timeout(lat, lng, climate_timeout)
+        inner = await _get_weather_widget_timeout(lat, lng, climate_timeout, settings)
     except asyncio.TimeoutError:
         logger.warning("Open-Meteo widget timeout farmer_id=%s lat=%s lng=%s", farmer_id, lat, lng)
         raise KrishiHTTPException(

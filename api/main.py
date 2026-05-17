@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routes import auth, conversation, farmer, health, market, query, sync, voice, weather
+from api.routes import auth, cache as cache_routes, conversation, farmer, health, jobs, market, query, sync, voice, weather
 from api.middleware.request_logging import install_request_logging
 from config.logging import configure_logging
 from config.settings import get_settings
@@ -37,6 +37,25 @@ async def lifespan(app: FastAPI):
             import logging
 
             logging.getLogger(__name__).exception("SupabaseSync on startup failed")
+
+    if settings.redis_configured and settings.startup_cache_warmup:
+        import asyncio
+        import logging as _log
+
+        async def _startup_warm() -> None:
+            try:
+                from cache.warmup import run_warmup, scopes_for_cron
+
+                await run_warmup(
+                    settings,
+                    scopes=scopes_for_cron("frequent"),
+                    include_scheme_vectors=False,
+                )
+            except Exception:
+                _log.getLogger(__name__).exception("Startup cache warm-up failed")
+
+        asyncio.create_task(_startup_warm())
+
     yield
 
 
@@ -62,6 +81,8 @@ def create_app() -> FastAPI:
     app.include_router(conversation.router)
     app.include_router(farmer.router)
     app.include_router(health.router)
+    app.include_router(cache_routes.router)
+    app.include_router(jobs.router)
     app.include_router(sync.router)
     app.include_router(market.router)
     app.include_router(weather.router)

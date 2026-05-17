@@ -148,6 +148,88 @@ class Settings(BaseSettings):
         description="Optional UUID string; voice worker uses this if join token had no farmer metadata.",
     )
 
+    # --- Upstash Redis (REST; HF Space + Railway voice worker reads warm cache when configured)
+    upstash_redis_rest_url: str = Field(
+        default="",
+        alias="UPSTASH_REDIS_REST_URL",
+        description="Upstash Redis REST URL (shown as UPSTASH_REDIS_REST_URL in console).",
+    )
+    upstash_redis_rest_token: str = Field(
+        default="",
+        alias="UPSTASH_REDIS_REST_TOKEN",
+        description="Upstash Redis REST token.",
+    )
+    # Aliases matching common env names from older docs / plan
+    upstash_redis_url: str = Field(default="", alias="UPSTASH_REDIS_URL")
+    upstash_redis_token: str = Field(default="", alias="UPSTASH_REDIS_TOKEN")
+
+    # TTLs for Redis-backed cache (defaults: conservative preset C from plan doc)
+    redis_twin_ttl_seconds: int = Field(
+        default=86400, alias="REDIS_TWIN_TTL_SECONDS", description="Default 24h."
+    )
+    redis_context_packet_ttl_seconds: int = Field(
+        default=604800, alias="REDIS_CONTEXT_PACKET_TTL_SECONDS", description="Default 7d."
+    )
+    redis_session_ttl_seconds: int = Field(
+        default=86400, alias="REDIS_SESSION_TTL_SECONDS", description="Default 24h."
+    )
+    redis_weather_ttl_seconds: int = Field(
+        default=3600, alias="REDIS_WEATHER_TTL_SECONDS", description="Default 1h."
+    )
+    redis_mandi_ttl_seconds: int = Field(
+        default=14400, alias="REDIS_MANDI_TTL_SECONDS", description="Default 4h."
+    )
+    redis_schemes_index_ttl_seconds: int = Field(
+        default=2592000, alias="REDIS_SCHEMES_INDEX_TTL_SECONDS", description="Default 30d."
+    )
+
+    # QStash — async jobs (persist to Supabase, sync, bundle regenerate, optional escalation enqueue)
+    qstash_token: str = Field(default="", alias="QSTASH_TOKEN")
+    qstash_url: str = Field(
+        default="",
+        alias="QSTASH_URL",
+        description="Usually https://qstash.upstash.io (default for SDK if empty).",
+    )
+    qstash_current_signing_key: str = Field(default="", alias="QSTASH_CURRENT_SIGNING_KEY")
+    qstash_next_signing_key: str = Field(default="", alias="QSTASH_NEXT_SIGNING_KEY")
+    public_api_base_url: str = Field(
+        default="",
+        alias="PUBLIC_API_BASE_URL",
+        description="Public HTTPS base of this API (no trailing slash). Used for QStash callbacks to /api/v1/internal/qstash/...",
+    )
+
+    warmup_secret: str = Field(default="", alias="WARMUP_SECRET")
+    warmup_states: str = Field(
+        default="",
+        alias="WARMUP_STATES",
+        description="Comma-separated state names used by warmup cron (e.g. Maharashtra,Punjab).",
+    )
+    warmup_districts: str = Field(
+        default="",
+        alias="WARMUP_DISTRICTS",
+        description="Comma-separated districts paired with warmup states or used as list.",
+    )
+    warmup_coordinates: str = Field(
+        default="",
+        alias="WARMUP_COORDINATES",
+        description="Weather warm-up coords: LAT:LNG pairs separated by | (e.g. 26.9124:75.7873|19.0760:72.8777).",
+    )
+
+    google_embedding_model: str = Field(
+        default="text-embedding-004",
+        alias="GOOGLE_EMBEDDING_MODEL",
+        description="Gemini embeddings for Upstash Vector (768 dims for text-embedding-004).",
+    )
+
+    upstash_vector_rest_url: str = Field(default="", alias="UPSTASH_VECTOR_REST_URL")
+    upstash_vector_rest_token: str = Field(default="", alias="UPSTASH_VECTOR_REST_TOKEN")
+
+    startup_cache_warmup: bool = Field(
+        default=True,
+        alias="STARTUP_CACHE_WARMUP",
+        description="If true and Redis is configured, enqueue / run warmup after startup.",
+    )
+
     @property
     def cors_origins_list(self) -> List[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
@@ -167,6 +249,33 @@ class Settings(BaseSettings):
     @property
     def livekit_configured(self) -> bool:
         return bool(self.livekit_url and self.livekit_api_key and self.livekit_api_secret)
+
+    @property
+    def redis_rest_url(self) -> str:
+        return (self.upstash_redis_rest_url or self.upstash_redis_url or "").strip()
+
+    @property
+    def redis_rest_token(self) -> str:
+        return (self.upstash_redis_rest_token or self.upstash_redis_token or "").strip()
+
+    @property
+    def redis_configured(self) -> bool:
+        return bool(self.redis_rest_url and self.redis_rest_token)
+
+    @property
+    def qstash_configured(self) -> bool:
+        return bool(
+            self.qstash_token.strip()
+            and self.public_api_base_url.strip()
+            and self.qstash_current_signing_key.strip()
+            and self.qstash_next_signing_key.strip()
+        )
+
+    @property
+    def upstash_vector_configured(self) -> bool:
+        return bool(
+            self.upstash_vector_rest_url.strip() and self.upstash_vector_rest_token.strip()
+        )
 
 
 @lru_cache

@@ -368,7 +368,8 @@ async def log_query(
     *,
     synced: int = 0,
     conversation_id: Optional[str] = None,
-) -> None:
+) -> int:
+    """Insert a conversation turn row; returns SQLite ``row id``."""
     now = int(time.time())
     async with get_connection(settings) as db:
         await db.execute(
@@ -381,6 +382,9 @@ async def log_query(
             (query_text, intent, response, now, data_source, conversation_id, synced),
         )
         await db.commit()
+        cur = await db.execute("SELECT last_insert_rowid() AS id")
+        row = await cur.fetchone()
+        return int(row["id"])
 
 
 async def get_query_history_for_conversation(

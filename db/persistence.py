@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Dict, List, Optional
 
 from config.settings import Settings, get_settings
@@ -19,6 +20,9 @@ from db.sqlite_client import (
     upsert_farmer_twin,
 )
 from models.farmer import FarmerTwin
+
+from cache import qstash_client
+from cache.context_builder import append_turn_update_redis
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +65,16 @@ async def persist_farmer_twin(
             await upsert_farmer_twin(twin, settings, synced=0)
     else:
         await upsert_farmer_twin(twin, settings, synced=1)
+
+    if settings.redis_configured:
+        try:
+            from cache.redis_client import redis_from_settings
+            from cache.context_builder import cache_farmer_twin
+
+            r = redis_from_settings(settings)
+            await cache_farmer_twin(r, twin, settings)
+        except Exception as e:
+            logger.debug("Redis twin cache after persist skipped: %s", e)
 
 
 async def persist_conversation_metadata(
@@ -213,7 +227,12 @@ async def persist_log_query(
     conversation_id: Optional[str] = None,
     settings: Optional[Settings] = None,
 ) -> None:
-    """Log a query/response turn. Ensures conversation_metadata exists when farmer_id is known."""
+    """Log a query/response turn. Ensures conversation_metadata exists when farmer_id is known.
+
+    Online + Supabase + QStash: writes SQLite ``synced=0`` immediately, enqueues remote insert.
+
+    Offline: SQLite ``synced=0`` only.
+    """
     settings = settings or get_settings()
     cid = (conversation_id or "").strip() or None
     if cid and farmer_id:
@@ -225,8 +244,20 @@ async def persist_log_query(
             logger.warning("conversation metadata touch failed: %s", e)
 
     offline = is_offline_context(connectivity)
+
+    fid = (farmer_id or "").strip()
+
+    async def _after_append() -> None:
+        if fid and cid and settings.redis_configured:
+            try:
+                await append_turn_update_redis(
+                    fid, cid, query_text, response[:3500], settings=settings
+                )
+            except Exception as e:
+                logger.debug("redis session append skipped: %s", e)
+
     if offline:
-        await log_query(
+        row_id = await log_query(
             query_text,
             intent,
             response,
@@ -235,7 +266,35 @@ async def persist_log_query(
             synced=0,
             conversation_id=cid,
         )
+        logger.debug("log_query sqlite id=%s (offline)", row_id)
+        await _after_append()
         return
+
+    if settings.supabase_db_configured and settings.qstash_configured:
+        row_id = await log_query(
+            query_text,
+            intent,
+            response,
+            data_source,
+            settings,
+            synced=0,
+            conversation_id=cid,
+        )
+        ts = int(time.time())
+        payload = {
+            "sqlite_row_id": row_id,
+            "query_text": query_text,
+            "intent": intent,
+            "response": response,
+            "data_source": data_source,
+            "conversation_id": cid,
+            "sqlite_timestamp_unix": ts,
+            "farmer_id": fid,
+        }
+        await qstash_client.safe_enqueue_persist(settings, payload, sqlite_row_id=row_id)
+        await _after_append()
+        return
+
     if settings.supabase_db_configured:
         try:
             await supabase_client.insert_query_history_remote(
@@ -277,3 +336,4 @@ async def persist_log_query(
             synced=1,
             conversation_id=cid,
         )
+    await _after_append()
