@@ -42,8 +42,10 @@ class FakeGemmaClient:
         image_bytes: bytes,
         prefer_local: bool = False,
         settings: Any = None,
+        *,
+        image_mime: str = "image/jpeg",
     ) -> str:
-        self.calls.append({"vision": True, "bytes": len(image_bytes)})
+        self.calls.append({"vision": True, "bytes": len(image_bytes), "image_mime": image_mime})
         return json.dumps(
             {"disease": "Yellow Rust", "confidence": 0.87, "treatment": ["Propiconazole"]}
         )

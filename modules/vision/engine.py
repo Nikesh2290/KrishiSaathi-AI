@@ -81,6 +81,8 @@ async def analyze_image(
     user_query: str,
     prefer_local: bool,
     settings: Settings | None = None,
+    *,
+    source_mime: str | None = None,
 ) -> Dict[str, Any]:
     settings = settings or get_settings()
     q = (user_query or "").strip()
@@ -97,13 +99,19 @@ async def analyze_image(
             "note": "no_image",
         }
 
-    norm_b64, _ = validate_and_resize_b64(image_b64)
+    norm_b64, norm_mime = validate_and_resize_b64(image_b64)
+    vision_mime = norm_mime or source_mime or "image/jpeg"
     user = (
         f'Farmer question (answer via JSON fields; same language tone as question): "{q}"\n'
         "Return ONLY one JSON object as specified in your instructions."
     )
     raw = await generate_with_vision(
-        SYSTEM_ANALYZE, user, norm_b64, prefer_local=prefer_local, settings=settings
+        SYSTEM_ANALYZE,
+        user,
+        norm_b64,
+        prefer_local=prefer_local,
+        settings=settings,
+        image_mime=vision_mime,
     )
     data = _parse_vision_json(_strip_json_fence(raw))
 
@@ -166,7 +174,9 @@ async def detect_disease_bytes(
     import base64
 
     b64 = base64.b64encode(data).decode("ascii")
-    return await analyze_image(b64, user_query, prefer_local, settings)
+    return await analyze_image(
+        b64, user_query, prefer_local, settings, source_mime=mime
+    )
 
 
 async def detect_disease_by_ref(
