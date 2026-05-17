@@ -173,6 +173,8 @@ async def generate_with_vision(
     image_b64: str,
     prefer_local: bool = True,
     settings: Optional[Settings] = None,
+    *,
+    image_mime: str = "image/jpeg",
 ) -> str:
     """Multimodal: image + text.
 
@@ -211,11 +213,14 @@ async def generate_with_vision(
         len(raw_bytes),
     )
 
+    if not image_mime or "/" not in image_mime:
+        image_mime = "image/jpeg"
+
     client = _genai.Client(api_key=settings.google_api_key)
     response = await client.aio.models.generate_content(
         model=settings.ai_studio_model,
         contents=[
-            _gtypes.Part.from_bytes(data=raw_bytes, mime_type="image/jpeg"),
+            _gtypes.Part.from_bytes(data=raw_bytes, mime_type=image_mime),
             _gtypes.Part(text=user_text),
         ],
         config=_gtypes.GenerateContentConfig(

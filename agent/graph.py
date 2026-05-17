@@ -84,6 +84,9 @@ You are given:
 
 Your job:
 - Answer the user's question directly and completely first.
+- Lead with the direct answer in the very first sentence.
+- Do not open with "Based on your query", background, or restating the question.
+- Keep total answer under 200 words unless the user clearly needs a detailed plan.
 - If any tool result is relevant and helpful to the question, weave it naturally into your answer.
 - If a tool result is NOT relevant to what the user asked, ignore it entirely (do not mention unrelated tools).
 - If a general_qa tool result is present with an "answer" field, treat that as the core answer — keep it as-is unless other tools clearly add useful facts for this query.
@@ -114,6 +117,9 @@ _DIRECT_LLM_PROMPT_FULL = """You are KrishiSaathi, a knowledgeable assistant foc
 
 Your task:
 - Answer the user's question completely and accurately, whatever the topic (general knowledge, chat, or farming).
+- Answer directly and concisely — lead with the answer, not context.
+- Do not start with "Based on your profile" or "Great question".
+- Aim for 3–5 short sentences unless a longer explanation is clearly needed.
 - Use farmer_profile when present: greet by name respectfully when natural.
 - After your main answer: if the question was NOT about farming, crops, soil, irrigation, mandi/markets, weather for crops, schemes/subsidies for farmers, loans/insurance for farmers, or farm pests/diseases, add ONE friendly closing sentence that you specialise in farming help and invite them to ask about crop, weather, mandi prices, or government schemes for farmers.
 - For voice-like replies: short sentences, no markdown lists, no headings — plain spoken language.
@@ -1045,8 +1051,9 @@ async def run_graph_stream(
 ) -> AsyncIterator[tuple[str, Optional[dict[str, Any]]]]:
     """Yield AI SDK UI Data Stream parts as (part_type, extra_fields_or_None).
 
-    Single-pass streaming: no planner LLM, no routing/stage/tool frames before text.
-    Either one direct LLM stream or parallel tools + one synthesis stream.
+    Single-pass streaming: optional ``data-tool`` frames for UI/voice fillers, then
+    ``text-start`` right before the first token. Either direct LLM stream or
+    parallel tools + synthesis stream.
     """
     settings = get_settings()
     message_id = str(uuid4())
@@ -1099,7 +1106,6 @@ async def run_graph_stream(
     confidence_score = 0.85
 
     yield ("start-step", {})
-    yield ("text-start", {"id": text_id})
 
     if not needs_tools:
         if twin is None:
@@ -1111,6 +1117,11 @@ async def run_graph_stream(
             req, twin, chat_hist, voice_mode=voice_mode
         )
         tool_trace = ["direct_llm"]
+        yield (
+            "data-tool",
+            {"data": {"tool": "direct_llm", "status": "started"}},
+        )
+        yield ("text-start", {"id": text_id})
         try:
             async for chunk in generate_stream(
                 messages, prefer_local=prefer_local, settings=settings
@@ -1125,10 +1136,22 @@ async def run_graph_stream(
             )
             draft = fb
             yield ("text-delta", {"id": text_id, "delta": fb})
+        yield ("text-end", {"id": text_id})
+        yield (
+            "data-tool",
+            {"data": {"tool": "direct_llm", "status": "done"}},
+        )
     else:
         plan = _normalize_tool_plan(_detect_tools(req), settings)
         if not plan:
             plan = [{"tool": "general_qa", "params": {"query": req.query.text or ""}}]
+        for step in plan:
+            nm = step.get("tool") if isinstance(step, dict) else None
+            if isinstance(nm, str) and nm:
+                yield (
+                    "data-tool",
+                    {"data": {"tool": nm, "status": "started"}},
+                )
         ctx = _DispatchContext(
             request=req,
             prefer_local=prefer_local,
@@ -1137,6 +1160,8 @@ async def run_graph_stream(
             cached_farmer_twin=twin,
         )
         tool_results, tool_trace = await _run_tools(plan, ctx)
+        for nm in tool_trace:
+            yield ("data-tool", {"data": {"tool": nm, "status": "done"}})
         if twin is None:
             twin = await resolve_farmer_twin(
                 req.farmer_id, req.context.connectivity, settings
@@ -1146,6 +1171,11 @@ async def run_graph_stream(
         )
         model_used = settings.ollama_model if prefer_local else settings.ai_studio_model
         confidence_score = 0.5
+        yield (
+            "data-tool",
+            {"data": {"tool": "synthesizing", "status": "started"}},
+        )
+        yield ("text-start", {"id": text_id})
         try:
             async for chunk in generate_stream(
                 syn_messages, prefer_local=prefer_local, settings=settings
@@ -1160,8 +1190,12 @@ async def run_graph_stream(
             )
             draft = fb
             yield ("text-delta", {"id": text_id, "delta": fb})
+        yield ("text-end", {"id": text_id})
+        yield (
+            "data-tool",
+            {"data": {"tool": "synthesizing", "status": "done"}},
+        )
 
-    yield ("text-end", {"id": text_id})
     yield ("finish-step", {})
 
     fallback_hint: Optional[str] = None
