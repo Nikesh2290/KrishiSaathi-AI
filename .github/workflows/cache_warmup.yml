@@ -1,0 +1,24 @@
+name: Redis cache warmup (weather + mandi + schemes index)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/30 * * * *'
+
+jobs:
+  call-warmup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Warm Upstash Redis caches
+        env:
+          HF_SPACE_URL: ${{ secrets.HF_SPACE_URL }}
+          WARMUP_SECRET: ${{ secrets.WARMUP_SECRET }}
+        run: |
+          if [ -z "$HF_SPACE_URL" ] || [ -z "$WARMUP_SECRET" ]; then
+            echo "Skipping: HF_SPACE_URL or WARMUP_SECRET not configured"
+            exit 0
+          fi
+          curl -fsS -X POST "${HF_SPACE_URL%/}/api/v1/cache/warmup" \
+            -H "X-Warmup-Secret: ${WARMUP_SECRET}" \
+            -H "Content-Type: application/json" \
+            -d '{"freq":"frequent","include_scheme_vectors":false}'

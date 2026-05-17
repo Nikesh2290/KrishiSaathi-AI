@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 
 import chromadb
 
-from config.settings import get_settings
+from config.settings import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -100,3 +100,40 @@ def search(query: str, k: int = 5, *, use_supabase: bool = False) -> List[Dict[s
         if js:
             out.append(json.loads(js))
     return out
+
+
+async def search_upstash_async(
+    query: str,
+    k: int = 5,
+    settings: Optional[Settings] = None,
+) -> List[Dict[str, Any]]:
+    """Gemini embeddings + Upstash Vector cosine search (online)."""
+    settings = settings or get_settings()
+    if not settings.upstash_vector_configured or not settings.google_api_key.strip():
+        return []
+    try:
+        import asyncio
+
+        from cache import gemini_embed
+        from cache.vector_client import get_async_vector_index
+
+        ix = get_async_vector_index(settings)
+        if ix is None:
+            return []
+
+        vec = await asyncio.to_thread(gemini_embed.embed_query_sync, settings, query or "")
+        results = await ix.query(vector=list(vec), top_k=k, include_metadata=True)
+        out: List[Dict[str, Any]] = []
+        for h in results:
+            meta = dict(h.metadata) if h.metadata else {}
+            js = meta.get("json")
+            if not js:
+                continue
+            try:
+                out.append(json.loads(str(js)))
+            except json.JSONDecodeError:
+                continue
+        return out
+    except Exception as e:
+        logger.warning("Upstash Vector scheme search failed: %s", e)
+        return []

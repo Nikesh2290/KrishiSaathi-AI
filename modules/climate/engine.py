@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Optional
 
 import httpx
 
+from cache import cache_keys as ck
+from cache.redis_client import get_redis_for_request, json_get_maybe, json_setex
+from config.settings import Settings, get_settings
+
 logger = logging.getLogger(__name__)
+
 
 CROP_WATER: Dict[str, int] = {
     "wheat": 2,
@@ -59,8 +64,25 @@ def wmo_weather_condition(code: Optional[int]) -> str:
     return "Mixed conditions"
 
 
-async def get_weather_widget(lat: float, lng: float) -> Dict[str, Any]:
+def _crop_tool_suffix(crop: str) -> str:
+    return (crop or "").strip().lower().replace(" ", "_")
+
+
+def weather_tool_cache_key(lat: float, lng: float, crop: str) -> str:
+    """Redis key for 7‑day agronomy weather tool payloads."""
+    return f"weather_tool:{ck.normalize_geo(lat, lng)}:{_crop_tool_suffix(crop)}"
+
+
+async def get_weather_widget(lat: float, lng: float, settings: Optional[Settings] = None) -> Dict[str, Any]:
     """Phone-style home widget: live current block + multi-day daily forecast."""
+    settings = settings or get_settings()
+    if settings.redis_configured:
+        r = get_redis_for_request(settings)
+        if r:
+            cached = await json_get_maybe(r, ck.weather_key(lat, lng))
+            if isinstance(cached, dict) and cached.get("current"):
+                return cached
+
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude": lat,
@@ -127,11 +149,33 @@ async def get_weather_widget(lat: float, lng: float) -> Dict[str, Any]:
             }
         )
 
-    return {"current": current, "forecast": forecast}
+    result = {"current": current, "forecast": forecast}
+    if settings.redis_configured:
+        r = get_redis_for_request(settings)
+        if r:
+            try:
+                await json_setex(
+                    r,
+                    ck.weather_key(lat, lng),
+                    ck.ttl_weather(settings),
+                    result,
+                )
+            except Exception:
+                logger.debug("Redis widget write skipped", exc_info=True)
+    return result
 
 
-async def get_weather(lat: float, lng: float, crop: str) -> Dict[str, Any]:
+async def get_weather(lat: float, lng: float, crop: str, settings: Optional[Settings] = None) -> Dict[str, Any]:
     """Fetch 7-day outlook + rain risk + irrigation hint."""
+    settings = settings or get_settings()
+    if settings.redis_configured:
+        r = get_redis_for_request(settings)
+        if r:
+            tk = weather_tool_cache_key(lat, lng, crop)
+            hit = await json_get_maybe(r, tk)
+            if isinstance(hit, dict) and hit.get("outlook"):
+                return hit
+
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude": lat,
@@ -180,10 +224,24 @@ async def get_weather(lat: float, lng: float, crop: str) -> Dict[str, Any]:
         "max_precip_probability_pct": round(float(max_rain_prob), 1),
     }
 
-    return {
+    out = {
         "outlook": outlook,
         "rain_risk": rain_risk,
         "irrigation_hint": irrigation_hint,
         "urgency": urgency,
         "source": "open_meteo",
     }
+    if settings.redis_configured:
+        r_rd = get_redis_for_request(settings)
+        if r_rd:
+            try:
+                await json_setex(
+                    r_rd,
+                    weather_tool_cache_key(lat, lng, crop),
+                    ck.ttl_weather(settings),
+                    out,
+                )
+            except Exception:
+                logger.debug("Redis tool weather write skipped", exc_info=True)
+
+    return out

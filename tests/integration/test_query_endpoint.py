@@ -28,7 +28,6 @@ def test_query_stream_mocked(monkeypatch, client):
 
     async def fake_stream(_req):
         yield ("start", {"messageId": "00000000-0000-0000-0000-000000000099"})
-        yield ("data-stage", {"data": {"stage": "routing"}})
         yield ("start-step", {})
         yield ("text-start", {"id": "txt_test"})
         yield ("text-delta", {"id": "txt_test", "delta": "hello"})
@@ -90,20 +89,16 @@ def test_query_stream_mocked(monkeypatch, client):
         "type": "start",
         "messageId": "00000000-0000-0000-0000-000000000099",
     }
-    assert payloads[1] == {
-        "type": "data-stage",
-        "data": {"stage": "routing"},
-    }
-    assert payloads[2] == {"type": "start-step"}
-    assert payloads[3] == {"type": "text-start", "id": "txt_test"}
-    assert payloads[4] == {"type": "text-delta", "id": "txt_test", "delta": "hello"}
-    assert payloads[5] == {"type": "text-end", "id": "txt_test"}
-    assert payloads[6] == {"type": "finish-step"}
-    assert payloads[7]["type"] == "data-metadata"
-    assert payloads[7]["data"]["confidence_score"] == 0.75
-    assert payloads[7]["data"]["structured"]["kind"] == "scheme"
-    assert "text" not in payloads[7]["data"]
-    assert payloads[8] == {"type": "finish"}
+    assert payloads[1] == {"type": "start-step"}
+    assert payloads[2] == {"type": "text-start", "id": "txt_test"}
+    assert payloads[3] == {"type": "text-delta", "id": "txt_test", "delta": "hello"}
+    assert payloads[4] == {"type": "text-end", "id": "txt_test"}
+    assert payloads[5] == {"type": "finish-step"}
+    assert payloads[6]["type"] == "data-metadata"
+    assert payloads[6]["data"]["confidence_score"] == 0.75
+    assert payloads[6]["data"]["structured"]["kind"] == "scheme"
+    assert "text" not in payloads[6]["data"]
+    assert payloads[7] == {"type": "finish"}
     assert payloads[-1] == "[DONE]"
 
 
@@ -199,7 +194,7 @@ def test_direct_llm_stream_parallel(monkeypatch, client):
         and p.get("type") == "data-tool"
         and p.get("data", {}).get("tool") == "thinking"
     ]
-    assert thinking_evts and thinking_evts[0]["data"]["status"] == "started"
+    assert not thinking_evts
 
     deltas = "".join(
         p.get("delta", "")

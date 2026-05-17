@@ -13,6 +13,9 @@ from config.settings import Settings, get_settings
 from db.sqlite_client import get_mandi_prices, upsert_mandi_prices_bulk
 from modules.market import ogd_client
 
+from cache import cache_keys as ck
+from cache.redis_client import get_redis_for_request, json_get_maybe
+
 logger = logging.getLogger(__name__)
 
 
@@ -119,6 +122,20 @@ async def get_prices(
     crop_s = (crop or "").strip() or "wheat"
     dist_s = (district or "").strip() or "Ludhiana"
     state_s = (state or "").strip()
+
+    if settings.redis_configured:
+        redis_c = get_redis_for_request(settings)
+        if redis_c:
+            raw = await json_get_maybe(redis_c, ck.mandi_key(state_s, dist_s))
+            if isinstance(raw, dict):
+                recs = raw.get("records") or []
+                matching = [
+                    r
+                    for r in recs
+                    if str(r.get("commodity", "") or "").strip().lower() == crop_s.lower()
+                ]
+                if matching:
+                    return _aggregate_rows(matching, "redis_cache")
 
     local_rows = await get_mandi_prices(crop_s, dist_s, settings)
     if local_rows:

@@ -13,7 +13,7 @@ import re
 from dataclasses import dataclass
 from uuid import uuid4
 from collections.abc import AsyncIterator
-from typing import Annotated, Any, Dict, List, Optional, TypedDict
+from typing import Annotated, Any, Dict, List, Optional, TypedDict, cast
 
 from models.response import AgentResponse
 
@@ -23,6 +23,8 @@ from agent.connectivity_router import data_source_for_route, resolve_route
 from agent.gemma_client import generate, generate_stream
 from agent.history import build_chat_history_context
 from config.settings import Settings, get_settings
+from cache import context_builder
+from cache.redis_client import get_redis_for_request
 from db.persistence import persist_log_query, resolve_farmer_twin
 from db.sqlite_client import get_last_n_turns
 from models.errors import KrishiHTTPException
@@ -147,6 +149,20 @@ class AgentState(TypedDict, total=False):
     confidence_score: float
     model_used: str
     fallback_hint: Optional[str]
+    prefetched_farmer_twin: Optional[FarmerTwin]
+    prefetched_chat_history: List[Dict[str, Any]]
+    redis_context_hit: bool
+
+
+async def _twin_for_graph(
+    state: AgentState,
+    req: AgentRequest,
+    settings: Settings,
+) -> Optional[FarmerTwin]:
+    t = state.get("prefetched_farmer_twin")
+    if t is not None:
+        return t
+    return await resolve_farmer_twin(req.farmer_id, req.context.connectivity, settings)
 
 
 def _farmer_profile_for_llm(twin: Optional[FarmerTwin]) -> Optional[Dict[str, Any]]:
@@ -277,6 +293,11 @@ def _heuristic_plan(req: AgentRequest) -> List[Dict[str, Any]]:
     return [{"tool": "general_qa", "params": {"query": req.query.text or ""}}]
 
 
+def _detect_tools(req: AgentRequest) -> List[Dict[str, Any]]:
+    """Keyword / image-based tool plan without a planner LLM call."""
+    return _heuristic_plan(req)
+
+
 _TOOL_REQUIRED_KEYWORDS = frozenset(
     {
         "weather",
@@ -341,6 +362,31 @@ def _build_direct_llm_messages(
     ]
 
 
+def _build_synthesis_messages(
+    req: AgentRequest,
+    twin: Optional[FarmerTwin],
+    tool_results: Dict[str, Any],
+    chat_history: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    farmer_profile = _farmer_profile_for_llm(twin)
+    payload = json.dumps(
+        {
+            "farmer_profile": farmer_profile,
+            "tools": tool_results,
+            "user_query": req.query.text,
+            "chat_history": chat_history or [],
+        },
+        ensure_ascii=False,
+    )[:12000]
+    return [
+        {
+            "role": "system",
+            "content": _system_with_language_rule(_SYNTHESIS_SYSTEM_PROMPT),
+        },
+        {"role": "user", "content": payload},
+    ]
+
+
 def _normalize_tool_plan(raw_tools: Any, settings: Settings) -> List[Dict[str, Any]]:
     if not isinstance(raw_tools, list):
         return []
@@ -379,8 +425,13 @@ async def _plan_with_llm(
     settings: Settings,
     *,
     chat_history: Optional[List[Dict[str, Any]]] = None,
+    twin_override: Optional[FarmerTwin] = None,
 ) -> List[Dict[str, Any]]:
-    twin = await resolve_farmer_twin(req.farmer_id, req.context.connectivity, settings)
+    twin = twin_override if twin_override is not None else await resolve_farmer_twin(
+        req.farmer_id,
+        req.context.connectivity,
+        settings,
+    )
     twin_payload = _farmer_profile_for_llm(twin)
     hist = chat_history if chat_history is not None else []
     user = json.dumps(
@@ -434,6 +485,7 @@ class _DispatchContext:
     prefer_local: bool
     offline: bool
     settings: Settings
+    cached_farmer_twin: Optional[FarmerTwin] = None
 
 
 async def _with_timeout(coro, seconds: float):
@@ -461,7 +513,11 @@ async def _dispatch_one(
 ) -> Dict[str, Any]:
     settings = ctx.settings
     req = ctx.request
-    twin = await resolve_farmer_twin(req.farmer_id, req.context.connectivity, settings)
+    twin = (
+        ctx.cached_farmer_twin
+        if ctx.cached_farmer_twin is not None
+        else await resolve_farmer_twin(req.farmer_id, req.context.connectivity, settings)
+    )
     timeout = _dispatch_timeout(settings, name, ctx)
 
     try:
@@ -477,7 +533,10 @@ async def _dispatch_one(
                     asyncio.to_thread(climate_offline.offline_weather, str(dist), crop),
                     timeout,
                 )
-            return await _with_timeout(climate_engine.get_weather(lat, lng, crop), timeout)
+            return await _with_timeout(
+                climate_engine.get_weather(lat, lng, crop, settings),
+                timeout,
+            )
 
         if name == "vision":
             image_ref = req.query.image_ref
@@ -623,19 +682,55 @@ async def node_route(state: AgentState) -> Dict[str, Any]:
     route = await resolve_route(req, settings)
     ds = data_source_for_route(route, req)
     offline = ds == "offline"
-    return {
+    extras: Dict[str, Any] = {}
+
+    cid = (req.conversation_id or "").strip()
+    fid = (req.farmer_id or "").strip()
+    if (
+        not offline
+        and settings.redis_configured
+        and cid
+        and fid
+        and req.context.connectivity.lower() != "offline"
+    ):
+        rdc = get_redis_for_request(settings)
+        if rdc is not None:
+            try:
+                loaded = await context_builder.load_route_prefetch(rdc, fid, cid, settings)
+                if loaded:
+                    extras.update(loaded)
+            except Exception as e:
+                logger.warning("redis route prefetch skipped: %s", e)
+
+    base = {
         "route": route,
         "data_source": ds,
         "prefer_local": offline,
         "offline": offline,
     }
+    base.update(extras)
+    return base
 
 
 async def node_plan(state: AgentState) -> Dict[str, Any]:
     settings = get_settings()
     req = state["request"]
     prefer_local = bool(state.get("prefer_local"))
-    chat_hist = await _load_chat_history(req, settings)
+    redis_hit = bool(state.get("redis_context_hit"))
+
+    if redis_hit:
+        chat_hist = list(state.get("prefetched_chat_history") or [])
+        twin_ov_raw = cast(Optional[FarmerTwin], state.get("prefetched_farmer_twin"))
+        if twin_ov_raw is not None:
+            twin_ov_plan = twin_ov_raw
+        else:
+            twin_ov_plan = await resolve_farmer_twin(
+                req.farmer_id, req.context.connectivity, settings
+            )
+    else:
+        chat_hist = await _load_chat_history(req, settings)
+        twin_ov_plan = None
+
     model_used = settings.ollama_model if prefer_local else settings.ai_studio_model
     if _is_nontool_query(req, chat_hist):
         return {
@@ -648,6 +743,7 @@ async def node_plan(state: AgentState) -> Dict[str, Any]:
         prefer_local=prefer_local,
         settings=settings,
         chat_history=chat_hist,
+        twin_override=twin_ov_plan,
     )
     return {"tool_plan": plan, "model_used": model_used, "chat_history": chat_hist}
 
@@ -678,7 +774,7 @@ async def _build_smalltalk_llm_messages(state: AgentState) -> tuple[list[Dict[st
     settings = get_settings()
     req = state["request"]
     prefer_local = bool(state.get("prefer_local"))
-    twin = await resolve_farmer_twin(req.farmer_id, req.context.connectivity, settings)
+    twin = await _twin_for_graph(state, req, settings)
     farmer_profile = _farmer_profile_for_llm(twin)
     payload = json.dumps(
         {
@@ -722,8 +818,8 @@ async def node_direct_llm(state: AgentState) -> Dict[str, Any]:
     settings = get_settings()
     req = state["request"]
     prefer_local = bool(state.get("prefer_local"))
-    twin = await resolve_farmer_twin(req.farmer_id, req.context.connectivity, settings)
     voice_mode = (req.context.device_intent or "").lower() == "voice"
+    twin = await _twin_for_graph(state, req, settings)
     messages = _build_direct_llm_messages(
         req,
         twin,
@@ -751,11 +847,15 @@ async def node_direct_llm(state: AgentState) -> Dict[str, Any]:
 async def node_tools(state: AgentState) -> Dict[str, Any]:
     settings = get_settings()
     req = state["request"]
+    twin_cache = None
+    if state.get("redis_context_hit"):
+        twin_cache = cast(Optional[FarmerTwin], state.get("prefetched_farmer_twin"))
     ctx = _DispatchContext(
         request=req,
         prefer_local=bool(state.get("prefer_local")),
         offline=bool(state.get("offline")),
         settings=settings,
+        cached_farmer_twin=twin_cache,
     )
     results, trace = await _run_tools(state.get("tool_plan") or [], ctx)
     return {"tool_results": results, "tool_trace": trace}
@@ -764,24 +864,10 @@ async def node_tools(state: AgentState) -> Dict[str, Any]:
 async def node_synthesize(state: AgentState) -> Dict[str, Any]:
     settings = get_settings()
     req = state["request"]
-    twin = await resolve_farmer_twin(req.farmer_id, req.context.connectivity, settings)
-    farmer_profile = _farmer_profile_for_llm(twin)
-    payload = json.dumps(
-        {
-            "farmer_profile": farmer_profile,
-            "tools": state.get("tool_results"),
-            "user_query": req.query.text,
-            "chat_history": state.get("chat_history") or [],
-        },
-        ensure_ascii=False,
-    )[:12000]
-    messages = [
-        {
-            "role": "system",
-            "content": _system_with_language_rule(_SYNTHESIS_SYSTEM_PROMPT),
-        },
-        {"role": "user", "content": payload},
-    ]
+    twin = await _twin_for_graph(state, req, settings)
+    messages = _build_synthesis_messages(
+        req, twin, state.get("tool_results") or {}, state.get("chat_history") or []
+    )
     model_used = (
         settings.ollama_model
         if state.get("prefer_local")
@@ -827,9 +913,7 @@ async def node_safety(state: AgentState) -> Dict[str, Any]:
         and not state.get("_escalated")  # type: ignore[typeddict-item]
     ):
         rq_esc = state["request"]
-        twin_esc = await resolve_farmer_twin(
-            rq_esc.farmer_id, rq_esc.context.connectivity, settings
-        )
+        twin_esc = await _twin_for_graph(state, rq_esc, settings)
         payload = json.dumps(
             {
                 "farmer_profile": _farmer_profile_for_llm(twin_esc),
@@ -854,6 +938,20 @@ async def node_safety(state: AgentState) -> Dict[str, Any]:
             model_used = settings.ai_studio_model_heavy
             trace.append("safety_escalation")
             score = max(score, 0.82)
+            if settings.qstash_configured:
+                try:
+                    from cache import qstash_client as _qsp
+
+                    await _qsp.enqueue_escalate_llm(
+                        settings,
+                        {
+                            "conversation_id": rq_esc.conversation_id,
+                            "farmer_id": rq_esc.farmer_id,
+                            "hint": "safety_escalation_completed",
+                        },
+                    )
+                except Exception as _qe:
+                    logger.debug("QStash escalate notify skipped: %s", _qe)
         except Exception as e:
             logger.warning("Escalation to heavy model failed: %s", e)
 
@@ -947,168 +1045,77 @@ async def run_graph_stream(
 ) -> AsyncIterator[tuple[str, Optional[dict[str, Any]]]]:
     """Yield AI SDK UI Data Stream parts as (part_type, extra_fields_or_None).
 
-    The HTTP layer emits ``data: {"type":<part_type>, ...}`` and ends with ``data: [DONE]``.
-    Typed text deltas use ``text-start`` / ``text-delta`` / ``text-end`` with shared ``id``.
+    Single-pass streaming: no planner LLM, no routing/stage/tool frames before text.
+    Either one direct LLM stream or parallel tools + one synthesis stream.
     """
     settings = get_settings()
     message_id = str(uuid4())
     text_id = f"txt_{uuid4().hex}"
 
+    route = await resolve_route(req, settings)
+    data_source = data_source_for_route(route, req)
+    offline = data_source == "offline"
+    prefer_local = route == "local"
+
+    redis_ctx: Dict[str, Any] = {}
+    cid = (req.conversation_id or "").strip()
+    fid = (req.farmer_id or "").strip()
+    if (
+        not offline
+        and settings.redis_configured
+        and cid
+        and fid
+        and req.context.connectivity.lower() != "offline"
+    ):
+        rdc = get_redis_for_request(settings)
+        if rdc is not None:
+            try:
+                loaded = await context_builder.load_route_prefetch(rdc, fid, cid, settings)
+                if loaded:
+                    redis_ctx = loaded
+            except Exception as e:
+                logger.warning("redis route prefetch skipped: %s", e)
+
+    if redis_ctx.get("redis_context_hit"):
+        chat_hist = list(redis_ctx.get("prefetched_chat_history") or [])
+        twin = cast(Optional[FarmerTwin], redis_ctx.get("prefetched_farmer_twin"))
+        if twin is None:
+            twin = await resolve_farmer_twin(
+                req.farmer_id, req.context.connectivity, settings
+            )
+    else:
+        chat_hist = await _load_chat_history(req, settings)
+        twin = None
+
     yield ("start", {"messageId": message_id})
-    yield ("data-stage", {"data": {"stage": "routing"}})
-    yield ("data-tool", {"data": {"tool": "routing", "status": "started"}})
 
-    state: AgentState = {"request": req}  # type: ignore[assignment]
-    state.update(await node_route(state))
-    yield ("data-tool", {"data": {"tool": "routing", "status": "done"}})
+    has_image = bool(req.query.image_ref)
+    needs_tools = has_image or not _is_nontool_query(req, chat_hist)
 
-    # Plan silently so voice/UI never show a "planning" filler before the route is known.
-    state.update(await node_plan(state))
+    draft = ""
+    tool_results: Dict[str, Any] = {}
+    tool_trace: List[str] = []
+    model_used = settings.ollama_model if prefer_local else settings.ai_studio_model
+    confidence_score = 0.85
 
-    plan_early = state.get("tool_plan") or []
-    if plan_early and plan_early[0].get("tool") == CLARIFY_TOOL:
-        yield ("data-stage", {"data": {"stage": "clarify"}})
-        yield ("data-tool", {"data": {"tool": "clarify", "status": "started"}})
-        state.update(await node_clarify(state))
-        clarify_text = state.get("draft_text") or ""
-        yield ("data-tool", {"data": {"tool": "clarify", "status": "done"}})
+    yield ("start-step", {})
+    yield ("text-start", {"id": text_id})
 
-        yield ("start-step", {})
-        yield ("text-start", {"id": text_id})
-        if clarify_text:
-            yield ("text-delta", {"id": text_id, "delta": clarify_text})
-        yield ("text-end", {"id": text_id})
-        yield ("finish-step", {})
-
-        state.update(await node_fallback_hint(state))
-
-        rq = req
-        resp = build(
-            draft_text=state.get("draft_text") or "",
-            tool_results={},
-            tool_trace=list(state.get("tool_trace") or []),
-            data_source=str(state.get("data_source") or "live"),
-            language=rq.query.language,
-            safety_flags=list(state.get("safety_flags") or []),
-            model_used=str(state.get("model_used") or settings.ai_studio_model),
-            confidence_score=float(state.get("confidence_score") or 1.0),
-            fallback_hint=state.get("fallback_hint"),  # type: ignore[arg-type]
-        )
-        resp.conversation_id = rq.conversation_id
-        try:
-            await persist_log_query(
-                rq.query.text,
-                resp.structured.kind,
-                resp.text[:2000],
-                resp.data_source,
-                rq.context.connectivity,
-                farmer_id=rq.farmer_id,
-                conversation_id=rq.conversation_id,
-                settings=settings,
+    if not needs_tools:
+        if twin is None:
+            twin = await resolve_farmer_twin(
+                req.farmer_id, req.context.connectivity, settings
             )
-        except Exception as e:
-            logger.warning("log_query failed: %s", e)
-
-        yield ("data-metadata", _agent_response_metadata(resp))
-        yield ("finish", {})
-        yield ("__done__", None)
-        return
-
-    if plan_early and plan_early[0].get("tool") == SMALLTALK_TOOL:
-        yield ("data-stage", {"data": {"stage": "smalltalk"}})
-        yield ("data-tool", {"data": {"tool": "smalltalk", "status": "started"}})
-        messages_st, model_used_st = await _build_smalltalk_llm_messages(state)
-        prefer_local_st = bool(state.get("prefer_local"))
-
-        yield ("start-step", {})
-        yield ("text-start", {"id": text_id})
-
-        draft_acc_st = ""
-        smalltalk_fb = "Namaste! Aaj main aapki kya madad kar sakta hoon?"
-        try:
-            async for chunk in generate_stream(
-                messages_st,
-                prefer_local=prefer_local_st,
-                settings=settings,
-            ):
-                draft_acc_st += chunk
-                yield ("text-delta", {"id": text_id, "delta": chunk})
-        except Exception as e:
-            logger.exception("Streaming smalltalk failed: %s", e)
-            draft_acc_st = smalltalk_fb
-            yield ("text-delta", {"id": text_id, "delta": smalltalk_fb})
-
-        yield ("text-end", {"id": text_id})
-        yield ("finish-step", {})
-        yield ("data-tool", {"data": {"tool": "smalltalk", "status": "done"}})
-
-        state["draft_text"] = draft_acc_st
-        state["model_used"] = model_used_st
-        state["tool_results"] = {}
-        state["tool_trace"] = ["smalltalk"]
-        state["safety_flags"] = []
-
-        yield ("data-tool", {"data": {"tool": "safety", "status": "started"}})
-        state.update(await node_safety(state))
-        yield ("data-tool", {"data": {"tool": "safety", "status": "done"}})
-        state.update(await node_fallback_hint(state))
-
-        rq_st = req
-        resp_st = build(
-            draft_text=state.get("draft_text") or "",
-            tool_results={},
-            tool_trace=list(state.get("tool_trace") or []),
-            data_source=str(state.get("data_source") or "live"),
-            language=rq_st.query.language,
-            safety_flags=list(state.get("safety_flags") or []),
-            model_used=str(state.get("model_used") or settings.ai_studio_model),
-            confidence_score=float(state.get("confidence_score") or 1.0),
-            fallback_hint=state.get("fallback_hint"),  # type: ignore[arg-type]
-        )
-        resp_st.conversation_id = rq_st.conversation_id
-        try:
-            await persist_log_query(
-                rq_st.query.text,
-                resp_st.structured.kind,
-                resp_st.text[:2000],
-                resp_st.data_source,
-                rq_st.context.connectivity,
-                farmer_id=rq_st.farmer_id,
-                conversation_id=rq_st.conversation_id,
-                settings=settings,
-            )
-        except Exception as e:
-            logger.warning("log_query failed: %s", e)
-
-        yield ("data-metadata", _agent_response_metadata(resp_st))
-        yield ("finish", {})
-        yield ("__done__", None)
-        return
-
-    if plan_early and plan_early[0].get("tool") == DIRECT_LLM_TOOL:
-        yield ("data-stage", {"data": {"stage": "direct_llm"}})
-        yield ("data-tool", {"data": {"tool": "thinking", "status": "started"}})
-        twin_dl = await resolve_farmer_twin(req.farmer_id, req.context.connectivity, settings)
         voice_mode = (req.context.device_intent or "").lower() == "voice"
-        messages_dl = _build_direct_llm_messages(
-            req,
-            twin_dl,
-            state.get("chat_history") or [],
-            voice_mode=voice_mode,
+        messages = _build_direct_llm_messages(
+            req, twin, chat_hist, voice_mode=voice_mode
         )
-        prefer_local_dl = bool(state.get("prefer_local"))
-        model_used_dl = settings.ollama_model if prefer_local_dl else settings.ai_studio_model
-
-        yield ("start-step", {})
-        yield ("text-start", {"id": text_id})
-        draft_dl = ""
+        tool_trace = ["direct_llm"]
         try:
             async for chunk in generate_stream(
-                messages_dl,
-                prefer_local=prefer_local_dl,
-                settings=settings,
+                messages, prefer_local=prefer_local, settings=settings
             ):
-                draft_dl += chunk
+                draft += chunk
                 yield ("text-delta", {"id": text_id, "delta": chunk})
         except Exception as e:
             logger.exception("Streaming direct_llm failed: %s", e)
@@ -1116,143 +1123,72 @@ async def run_graph_stream(
                 "Sorry, I couldn't answer right now. Please try again. "
                 "माफ़ कीजिए, अभी जवाब नहीं बना पाया।"
             )
-            draft_dl = fb
+            draft = fb
             yield ("text-delta", {"id": text_id, "delta": fb})
-
-        yield ("text-end", {"id": text_id})
-        yield ("finish-step", {})
-        yield ("data-tool", {"data": {"tool": "thinking", "status": "done"}})
-
-        state["draft_text"] = draft_dl
-        state["model_used"] = model_used_dl
-        state["tool_results"] = {}
-        state["tool_trace"] = ["direct_llm"]
-        state["safety_flags"] = []
-
-        yield ("data-tool", {"data": {"tool": "safety", "status": "started"}})
-        state.update(await node_safety(state))
-        yield ("data-tool", {"data": {"tool": "safety", "status": "done"}})
-        state.update(await node_fallback_hint(state))
-
-        rq_dl = req
-        resp_dl = build(
-            draft_text=state.get("draft_text") or "",
-            tool_results={},
-            tool_trace=list(state.get("tool_trace") or []),
-            data_source=str(state.get("data_source") or "live"),
-            language=rq_dl.query.language,
-            safety_flags=list(state.get("safety_flags") or []),
-            model_used=str(state.get("model_used") or settings.ai_studio_model),
-            confidence_score=float(state.get("confidence_score") or 0.85),
-            fallback_hint=state.get("fallback_hint"),  # type: ignore[arg-type]
+    else:
+        plan = _normalize_tool_plan(_detect_tools(req), settings)
+        if not plan:
+            plan = [{"tool": "general_qa", "params": {"query": req.query.text or ""}}]
+        ctx = _DispatchContext(
+            request=req,
+            prefer_local=prefer_local,
+            offline=offline,
+            settings=settings,
+            cached_farmer_twin=twin,
         )
-        resp_dl.conversation_id = rq_dl.conversation_id
-        try:
-            await persist_log_query(
-                rq_dl.query.text,
-                resp_dl.structured.kind,
-                resp_dl.text[:2000],
-                resp_dl.data_source,
-                rq_dl.context.connectivity,
-                farmer_id=rq_dl.farmer_id,
-                conversation_id=rq_dl.conversation_id,
-                settings=settings,
+        tool_results, tool_trace = await _run_tools(plan, ctx)
+        if twin is None:
+            twin = await resolve_farmer_twin(
+                req.farmer_id, req.context.connectivity, settings
             )
-        except Exception as e:
-            logger.warning("log_query failed: %s", e)
-
-        yield ("data-metadata", _agent_response_metadata(resp_dl))
-        yield ("finish", {})
-        yield ("__done__", None)
-        return
-
-    yield ("data-stage", {"data": {"stage": "tools"}})
-    planned_tools = [
-        step.get("tool") or step.get("name")
-        for step in plan_early
-        if step.get("tool") or step.get("name")
-    ]
-    for tn in planned_tools:
-        yield ("data-tool", {"data": {"tool": str(tn), "status": "started"}})
-    state.update(await node_tools(state))
-    for tn in planned_tools:
-        yield ("data-tool", {"data": {"tool": str(tn), "status": "done"}})
-
-    yield ("data-stage", {"data": {"stage": "synthesizing"}})
-    yield ("data-tool", {"data": {"tool": "synthesizing", "status": "started"}})
-    rq = req
-    twin_syn = await resolve_farmer_twin(rq.farmer_id, rq.context.connectivity, settings)
-    payload = json.dumps(
-        {
-            "farmer_profile": _farmer_profile_for_llm(twin_syn),
-            "tools": state.get("tool_results"),
-            "user_query": rq.query.text,
-            "chat_history": state.get("chat_history") or [],
-        },
-        ensure_ascii=False,
-    )[:12000]
-    messages = [
-        {
-            "role": "system",
-            "content": _system_with_language_rule(_SYNTHESIS_SYSTEM_PROMPT),
-        },
-        {"role": "user", "content": payload},
-    ]
-    prefer_local = bool(state.get("prefer_local"))
-    model_used = settings.ollama_model if prefer_local else settings.ai_studio_model
-
-    yield ("start-step", {})
-    yield ("text-start", {"id": text_id})
-
-    draft_acc = ""
-    try:
-        async for chunk in generate_stream(
-            messages, prefer_local=prefer_local, settings=settings
-        ):
-            draft_acc += chunk
-            yield ("text-delta", {"id": text_id, "delta": chunk})
-    except Exception as e:
-        logger.exception("Streaming synthesize failed: %s", e)
-        fb = (
-            "यहाँ उपलब्ध जानकारी के आधार पर सुझाव दिए गए हैं। "
-            "कृपया स्थानीय कृषि अधिकारी से पुष्टि करें।"
+        syn_messages = _build_synthesis_messages(
+            req, twin, tool_results, chat_hist
         )
-        draft_acc = fb
-        yield ("text-delta", {"id": text_id, "delta": fb})
+        model_used = settings.ollama_model if prefer_local else settings.ai_studio_model
+        confidence_score = 0.5
+        try:
+            async for chunk in generate_stream(
+                syn_messages, prefer_local=prefer_local, settings=settings
+            ):
+                draft += chunk
+                yield ("text-delta", {"id": text_id, "delta": chunk})
+        except Exception as e:
+            logger.exception("Streaming synthesize failed: %s", e)
+            fb = (
+                "यहाँ उपलब्ध जानकारी के आधार पर सुझाव दिए गए हैं। "
+                "कृपया स्थानीय कृषि अधिकारी से पुष्टि करें।"
+            )
+            draft = fb
+            yield ("text-delta", {"id": text_id, "delta": fb})
 
     yield ("text-end", {"id": text_id})
     yield ("finish-step", {})
-    yield ("data-tool", {"data": {"tool": "synthesizing", "status": "done"}})
 
-    state["draft_text"] = draft_acc
-    state["model_used"] = model_used
-
-    yield ("data-tool", {"data": {"tool": "safety", "status": "started"}})
-    state.update(await node_safety(state))
-    yield ("data-tool", {"data": {"tool": "safety", "status": "done"}})
-    state.update(await node_fallback_hint(state))
+    fallback_hint: Optional[str] = None
+    if offline and confidence_score < 0.7:
+        fallback_hint = "USE_ONDEVICE"
 
     resp = build(
-        draft_text=state.get("draft_text") or "",
-        tool_results=state.get("tool_results") or {},
-        tool_trace=list(state.get("tool_trace") or []),
-        data_source=str(state.get("data_source") or "live"),
-        language=rq.query.language,
-        safety_flags=list(state.get("safety_flags") or []),
-        model_used=str(state.get("model_used") or settings.ai_studio_model),
-        confidence_score=float(state.get("confidence_score") or 0.5),
-        fallback_hint=state.get("fallback_hint"),  # type: ignore[arg-type]
+        draft_text=draft,
+        tool_results=tool_results,
+        tool_trace=tool_trace,
+        data_source=data_source,
+        language=req.query.language,
+        safety_flags=[],
+        model_used=model_used,
+        confidence_score=confidence_score,
+        fallback_hint=fallback_hint,  # type: ignore[arg-type]
     )
-    resp.conversation_id = rq.conversation_id
+    resp.conversation_id = req.conversation_id
     try:
         await persist_log_query(
-            rq.query.text,
+            req.query.text,
             resp.structured.kind,
             resp.text[:2000],
             resp.data_source,
-            rq.context.connectivity,
-            farmer_id=rq.farmer_id,
-            conversation_id=rq.conversation_id,
+            req.context.connectivity,
+            farmer_id=req.farmer_id,
+            conversation_id=req.conversation_id,
             settings=settings,
         )
     except Exception as e:
