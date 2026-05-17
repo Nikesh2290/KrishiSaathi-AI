@@ -194,7 +194,18 @@ def test_direct_llm_stream_parallel(monkeypatch, client):
         and p.get("type") == "data-tool"
         and p.get("data", {}).get("tool") == "thinking"
     ]
-    assert not thinking_evts
+    assert thinking_evts
+    assert any(e["data"]["status"] == "started" for e in thinking_evts)
+    assert any(e["data"]["status"] == "done" for e in thinking_evts)
+
+    routing_evts = [
+        p
+        for p in payloads
+        if isinstance(p, dict)
+        and p.get("type") == "data-tool"
+        and p.get("data", {}).get("tool") == "routing"
+    ]
+    assert routing_evts
 
     deltas = "".join(
         p.get("delta", "")

@@ -1046,6 +1046,23 @@ def _agent_response_metadata(resp: AgentResponse) -> dict:
     return {"data": d}
 
 
+def _stream_tool(tool: str, status: str) -> tuple[str, dict[str, Any]]:
+    return ("data-tool", {"data": {"tool": tool, "status": status}})
+
+
+def _stream_stage(stage: str, status: str) -> tuple[str, dict[str, Any]]:
+    return ("data-stage", {"data": {"stage": stage, "status": status}})
+
+
+async def _emit_stream_preamble() -> AsyncIterator[tuple[str, dict[str, Any]]]:
+    """UI/voice progress: routing then thinking (before tool work or answer stream)."""
+    yield _stream_tool("routing", "started")
+    yield _stream_stage("routing", "started")
+    yield _stream_stage("routing", "done")
+    yield _stream_tool("routing", "done")
+    yield _stream_tool("thinking", "started")
+
+
 async def run_graph_stream(
     req: AgentRequest,
 ) -> AsyncIterator[tuple[str, Optional[dict[str, Any]]]]:
@@ -1105,6 +1122,9 @@ async def run_graph_stream(
     model_used = settings.ollama_model if prefer_local else settings.ai_studio_model
     confidence_score = 0.85
 
+    async for part in _emit_stream_preamble():
+        yield part
+
     yield ("start-step", {})
 
     if not needs_tools:
@@ -1117,10 +1137,9 @@ async def run_graph_stream(
             req, twin, chat_hist, voice_mode=voice_mode
         )
         tool_trace = ["direct_llm"]
-        yield (
-            "data-tool",
-            {"data": {"tool": "direct_llm", "status": "started"}},
-        )
+        yield _stream_stage("direct_llm", "started")
+        yield _stream_tool("direct_llm", "started")
+        yield _stream_tool("thinking", "done")
         yield ("text-start", {"id": text_id})
         try:
             async for chunk in generate_stream(
@@ -1137,21 +1156,17 @@ async def run_graph_stream(
             draft = fb
             yield ("text-delta", {"id": text_id, "delta": fb})
         yield ("text-end", {"id": text_id})
-        yield (
-            "data-tool",
-            {"data": {"tool": "direct_llm", "status": "done"}},
-        )
+        yield _stream_tool("direct_llm", "done")
+        yield _stream_stage("direct_llm", "done")
     else:
         plan = _normalize_tool_plan(_detect_tools(req), settings)
         if not plan:
             plan = [{"tool": "general_qa", "params": {"query": req.query.text or ""}}]
+        yield _stream_stage("tools", "started")
         for step in plan:
             nm = step.get("tool") if isinstance(step, dict) else None
             if isinstance(nm, str) and nm:
-                yield (
-                    "data-tool",
-                    {"data": {"tool": nm, "status": "started"}},
-                )
+                yield _stream_tool(nm, "started")
         ctx = _DispatchContext(
             request=req,
             prefer_local=prefer_local,
@@ -1161,7 +1176,8 @@ async def run_graph_stream(
         )
         tool_results, tool_trace = await _run_tools(plan, ctx)
         for nm in tool_trace:
-            yield ("data-tool", {"data": {"tool": nm, "status": "done"}})
+            yield _stream_tool(nm, "done")
+        yield _stream_stage("tools", "done")
         if twin is None:
             twin = await resolve_farmer_twin(
                 req.farmer_id, req.context.connectivity, settings
@@ -1171,10 +1187,9 @@ async def run_graph_stream(
         )
         model_used = settings.ollama_model if prefer_local else settings.ai_studio_model
         confidence_score = 0.5
-        yield (
-            "data-tool",
-            {"data": {"tool": "synthesizing", "status": "started"}},
-        )
+        yield _stream_stage("synthesizing", "started")
+        yield _stream_tool("synthesizing", "started")
+        yield _stream_tool("thinking", "done")
         yield ("text-start", {"id": text_id})
         try:
             async for chunk in generate_stream(
@@ -1191,10 +1206,8 @@ async def run_graph_stream(
             draft = fb
             yield ("text-delta", {"id": text_id, "delta": fb})
         yield ("text-end", {"id": text_id})
-        yield (
-            "data-tool",
-            {"data": {"tool": "synthesizing", "status": "done"}},
-        )
+        yield _stream_tool("synthesizing", "done")
+        yield _stream_stage("synthesizing", "done")
 
     yield ("finish-step", {})
 

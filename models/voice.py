@@ -20,3 +20,7 @@ class VoiceTokenResponse(BaseModel):
     room_name: str
     participant_token: str
     participant_identity: str
+    conversation_id: str = Field(
+        ...,
+        description="Thread id for voice/text memory; minted when the client omits one.",
+    )

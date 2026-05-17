@@ -47,9 +47,10 @@ async def post_voice_token(body: VoiceTokenRequest) -> VoiceTokenResponse:
     except Exception as exc:
         logger.debug("resolve_farmer_twin for voice display name: %s", exc)
 
+    conversation_id = (body.conversation_id or "").strip() or str(uuid.uuid4())
     meta = {
         "farmer_id": body.farmer_id,
-        "conversation_id": body.conversation_id,
+        "conversation_id": conversation_id,
         "language": body.language or "en",
     }
     try:
@@ -95,4 +96,5 @@ async def post_voice_token(body: VoiceTokenRequest) -> VoiceTokenResponse:
         room_name=room,
         participant_token=token,
         participant_identity=identity,
+        conversation_id=conversation_id,
     )

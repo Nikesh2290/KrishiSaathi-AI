@@ -8,6 +8,7 @@ import logging
 import os
 import random
 import re
+import uuid
 from pathlib import Path
 from collections.abc import AsyncIterable
 from typing import Any, Optional
@@ -552,9 +553,10 @@ async def entrypoint(ctx: JobContext) -> None:
 
     raw_conv = meta.get("conversation_id")
     if raw_conv is None or raw_conv == "":
-        conv = None
+        conv = str(uuid.uuid4())
+        logger.info("voice session: no conversation_id in metadata, using %s", conv)
     else:
-        conv = str(raw_conv).strip() or None
+        conv = str(raw_conv).strip() or str(uuid.uuid4())
     language = str(meta.get("language") or "en").strip() or "en"
 
     api_base = os.getenv("KRISHI_API_BASE_URL", "http://127.0.0.1:8000").strip()
