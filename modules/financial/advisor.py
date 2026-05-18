@@ -37,8 +37,6 @@ async def advise(
     prefer_local: bool,
     season: str = "rabi",
     settings: Settings | None = None,
-    *,
-    voice_mode: bool = False,
 ) -> Dict[str, Any]:
     settings = settings or get_settings()
     numbers = advise_sync(twin, season=season)
@@ -53,8 +51,6 @@ async def advise(
         },
         {"role": "user", "content": json.dumps(numbers, ensure_ascii=False)},
     ]
-    narrative = await generate(
-        msgs, prefer_local=prefer_local, settings=settings, voice_mode=voice_mode
-    )
+    narrative = await generate(msgs, prefer_local=prefer_local, settings=settings)
     numbers["narrative"] = narrative
     return numbers

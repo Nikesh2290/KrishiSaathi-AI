@@ -26,7 +26,7 @@ async def test_low_confidence_escalates_to_heavy_model(monkeypatch):
     install_fake(monkeypatch, fake)
 
     # Force vision tool to return low-confidence result by stubbing the vision engine.
-    async def fake_vision(image_ref, prefer_local, settings, user_query="", **kwargs):
+    async def fake_vision(image_ref, prefer_local, settings, user_query=""):
         return {"disease": "Unknown", "confidence": 0.55, "treatment": []}
 
     import modules.vision.engine as ve
@@ -57,7 +57,7 @@ async def test_high_confidence_does_not_escalate(monkeypatch):
     fake.plan_response = {"tools": [{"tool": "vision", "params": {"use_image": True}}]}
     install_fake(monkeypatch, fake)
 
-    async def fake_vision(image_ref, prefer_local, settings, user_query="", **kwargs):
+    async def fake_vision(image_ref, prefer_local, settings, user_query=""):
         return {"disease": "Yellow Rust", "confidence": 0.92, "treatment": ["X"]}
 
     import modules.vision.engine as ve

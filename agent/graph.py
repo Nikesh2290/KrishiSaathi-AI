@@ -44,17 +44,6 @@ from safety.layer import should_escalate
 
 logger = logging.getLogger(__name__)
 
-
-def _is_voice_mode(req: AgentRequest) -> bool:
-    return (req.context.device_intent or "").lower() == "voice"
-
-
-def _model_used_label(settings: Settings, *, prefer_local: bool, voice_mode: bool) -> str:
-    if voice_mode:
-        return settings.ollama_model if prefer_local else settings.ai_studio_voice_model
-    return settings.ollama_chat_model if prefer_local else settings.ai_studio_model
-
-
 CLARIFY_TOOL = "__clarify__"
 SMALLTALK_TOOL = "__smalltalk__"
 DIRECT_LLM_TOOL = "__direct_llm__"
@@ -454,7 +443,6 @@ async def _plan_with_llm(
     )
     twin_payload = _farmer_profile_for_llm(twin)
     hist = chat_history if chat_history is not None else []
-    voice_mode_plan = _is_voice_mode(req)
     user = json.dumps(
         {
             "farmer_id": req.farmer_id,
@@ -467,7 +455,7 @@ async def _plan_with_llm(
     )
     planner_sys = (
         _PLANNER_PROMPT_VOICE
-        if voice_mode_plan
+        if (req.context.device_intent or "").lower() == "voice"
         else _PLANNER_PROMPT
     )
     messages = [
@@ -475,7 +463,7 @@ async def _plan_with_llm(
         {"role": "user", "content": user},
     ]
     try:
-        raw = (await generate(messages, prefer_local=prefer_local, settings=settings, voice_mode=voice_mode_plan)).strip()
+        raw = (await generate(messages, prefer_local=prefer_local, settings=settings)).strip()
         if raw.startswith("```"):
             raw = re.sub(r"^```[a-z]*\n", "", raw)
             raw = re.sub(r"\n```$", "", raw)
@@ -507,10 +495,6 @@ class _DispatchContext:
     offline: bool
     settings: Settings
     cached_farmer_twin: Optional[FarmerTwin] = None
-
-    @property
-    def voice_mode(self) -> bool:
-        return _is_voice_mode(self.request)
 
 
 async def _with_timeout(coro, seconds: float):
@@ -571,7 +555,6 @@ async def _dispatch_one(
                     ctx.prefer_local,
                     settings,
                     user_query=req.query.text or "",
-                    voice_mode=ctx.voice_mode,
                 ),
                 timeout,
             )
@@ -579,14 +562,7 @@ async def _dispatch_one(
         if name == "scheme":
             q = params.get("query") or req.query.text or "PM-KISAN"
             return await _with_timeout(
-                scheme_navigator.find_schemes(
-                    twin,
-                    q,
-                    ctx.prefer_local,
-                    ctx.offline,
-                    settings,
-                    voice_mode=ctx.voice_mode,
-                ),
+                scheme_navigator.find_schemes(twin, q, ctx.prefer_local, ctx.offline, settings),
                 timeout,
             )
 
@@ -599,13 +575,7 @@ async def _dispatch_one(
             water = "tube_well"
             return await _with_timeout(
                 crop_planner.recommend_async(
-                    soil,
-                    state,
-                    season,
-                    water,
-                    ctx.prefer_local,
-                    settings,
-                    voice_mode=ctx.voice_mode,
+                    soil, state, season, water, ctx.prefer_local, settings
                 ),
                 timeout,
             )
@@ -613,12 +583,7 @@ async def _dispatch_one(
         if name == "financial":
             t = twin or FarmerTwin(farmer_id=req.farmer_id)
             return await _with_timeout(
-                financial_advisor.advise(
-                    t,
-                    ctx.prefer_local,
-                    settings=settings,
-                    voice_mode=ctx.voice_mode,
-                ),
+                financial_advisor.advise(t, ctx.prefer_local, settings=settings),
                 timeout,
             )
 
@@ -658,12 +623,7 @@ async def _dispatch_one(
                 {"role": "user", "content": q},
             ]
             answer = await _with_timeout(
-                generate(
-                    msgs,
-                    prefer_local=ctx.prefer_local,
-                    settings=settings,
-                    voice_mode=ctx.voice_mode,
-                ),
+                generate(msgs, prefer_local=ctx.prefer_local, settings=settings),
                 timeout,
             )
             return {"answer": answer, "source": "llm_knowledge"}
@@ -780,8 +740,7 @@ async def node_plan(state: AgentState) -> Dict[str, Any]:
         chat_hist = await _load_chat_history(req, settings)
         twin_ov_plan = None
 
-    voice_mode = _is_voice_mode(req)
-    model_used = _model_used_label(settings, prefer_local=prefer_local, voice_mode=voice_mode)
+    model_used = settings.ollama_model if prefer_local else settings.ai_studio_model
     if _is_nontool_query(req, chat_hist):
         return {
             "tool_plan": [{"tool": DIRECT_LLM_TOOL, "params": {}}],
@@ -820,11 +779,10 @@ async def node_clarify(state: AgentState) -> Dict[str, Any]:
     }
 
 
-async def _build_smalltalk_llm_messages(state: AgentState) -> tuple[list[Dict[str, Any]], str, bool]:
+async def _build_smalltalk_llm_messages(state: AgentState) -> tuple[list[Dict[str, Any]], str]:
     settings = get_settings()
     req = state["request"]
     prefer_local = bool(state.get("prefer_local"))
-    voice_mode = _is_voice_mode(req)
     twin = await _twin_for_graph(state, req, settings)
     farmer_profile = _farmer_profile_for_llm(twin)
     payload = json.dumps(
@@ -842,16 +800,16 @@ async def _build_smalltalk_llm_messages(state: AgentState) -> tuple[list[Dict[st
         },
         {"role": "user", "content": payload},
     ]
-    model_used = _model_used_label(settings, prefer_local=prefer_local, voice_mode=voice_mode)
-    return messages, model_used, voice_mode
+    model_used = settings.ollama_model if prefer_local else settings.ai_studio_model
+    return messages, model_used
 
 
 async def node_smalltalk(state: AgentState) -> Dict[str, Any]:
     settings = get_settings()
     prefer_local = bool(state.get("prefer_local"))
-    messages, model_used, voice_mode = await _build_smalltalk_llm_messages(state)
+    messages, model_used = await _build_smalltalk_llm_messages(state)
     try:
-        draft = await generate(messages, prefer_local=prefer_local, settings=settings, voice_mode=voice_mode)
+        draft = await generate(messages, prefer_local=prefer_local, settings=settings)
     except Exception:
         draft = "Namaste! Aaj main aapki kya madad kar sakta hoon?"
     return {
@@ -869,7 +827,7 @@ async def node_direct_llm(state: AgentState) -> Dict[str, Any]:
     settings = get_settings()
     req = state["request"]
     prefer_local = bool(state.get("prefer_local"))
-    voice_mode = _is_voice_mode(req)
+    voice_mode = (req.context.device_intent or "").lower() == "voice"
     twin = await _twin_for_graph(state, req, settings)
     messages = _build_direct_llm_messages(
         req,
@@ -877,9 +835,9 @@ async def node_direct_llm(state: AgentState) -> Dict[str, Any]:
         state.get("chat_history") or [],
         voice_mode=voice_mode,
     )
-    model_used = _model_used_label(settings, prefer_local=prefer_local, voice_mode=voice_mode)
+    model_used = settings.ollama_model if prefer_local else settings.ai_studio_model
     try:
-        draft = await generate(messages, prefer_local=prefer_local, settings=settings, voice_mode=voice_mode)
+        draft = await generate(messages, prefer_local=prefer_local, settings=settings)
     except Exception:
         draft = (
             "माफ़ कीजिए, अभी जवाब नहीं बना पाया। कृपया दोबारा कोशिश करें। "
@@ -915,16 +873,18 @@ async def node_tools(state: AgentState) -> Dict[str, Any]:
 async def node_synthesize(state: AgentState) -> Dict[str, Any]:
     settings = get_settings()
     req = state["request"]
-    voice_mode = _is_voice_mode(req)
     twin = await _twin_for_graph(state, req, settings)
     messages = _build_synthesis_messages(
         req, twin, state.get("tool_results") or {}, state.get("chat_history") or []
     )
-    prefer_local = bool(state.get("prefer_local"))
-    model_used = _model_used_label(settings, prefer_local=prefer_local, voice_mode=voice_mode)
+    model_used = (
+        settings.ollama_model
+        if state.get("prefer_local")
+        else settings.ai_studio_model
+    )
     try:
         draft = await generate(
-            messages, prefer_local=prefer_local, settings=settings, voice_mode=voice_mode
+            messages, prefer_local=bool(state.get("prefer_local")), settings=settings
         )
     except Exception as e:
         logger.exception("Synthesize failed: %s", e)
@@ -972,7 +932,6 @@ async def node_safety(state: AgentState) -> Dict[str, Any]:
             },
             ensure_ascii=False,
         )[:12000]
-        voice_mode_esc = _is_voice_mode(rq_esc)
         messages = [
             {
                 "role": "system",
@@ -984,12 +943,8 @@ async def node_safety(state: AgentState) -> Dict[str, Any]:
             {"role": "user", "content": payload},
         ]
         try:
-            draft = await generate(messages, prefer_local=False, settings=settings, heavy=True, voice_mode=voice_mode_esc)
-            model_used = _model_used_label(
-                settings, prefer_local=False, voice_mode=voice_mode_esc
-            )
-            if not voice_mode_esc:
-                model_used = settings.ai_studio_model_heavy
+            draft = await generate(messages, prefer_local=False, settings=settings, heavy=True)
+            model_used = settings.ai_studio_model_heavy
             trace.append("safety_escalation")
             score = max(score, 0.82)
             if settings.qstash_configured:
@@ -1185,8 +1140,7 @@ async def run_graph_stream(
     draft = ""
     tool_results: Dict[str, Any] = {}
     tool_trace: List[str] = []
-    voice_mode = _is_voice_mode(req)
-    model_used = _model_used_label(settings, prefer_local=prefer_local, voice_mode=voice_mode)
+    model_used = settings.ollama_model if prefer_local else settings.ai_studio_model
     confidence_score = 0.85
 
     async for part in _emit_stream_preamble():
@@ -1201,6 +1155,7 @@ async def run_graph_stream(
             )
             if timeline:
                 timeline.mark("resolve_farmer_twin_done", twin_found=twin is not None)
+        voice_mode = (req.context.device_intent or "").lower() == "voice"
         messages = _build_direct_llm_messages(
             req, twin, chat_hist, voice_mode=voice_mode
         )
@@ -1214,7 +1169,7 @@ async def run_graph_stream(
         llm_ttft_logged = False
         try:
             async for chunk in generate_stream(
-                messages, prefer_local=prefer_local, settings=settings, voice_mode=voice_mode
+                messages, prefer_local=prefer_local, settings=settings
             ):
                 if timeline and not llm_ttft_logged:
                     timeline.mark("llm_first_token", path="direct_llm")
@@ -1267,7 +1222,7 @@ async def run_graph_stream(
         syn_messages = _build_synthesis_messages(
             req, twin, tool_results, chat_hist
         )
-        model_used = _model_used_label(settings, prefer_local=prefer_local, voice_mode=voice_mode)
+        model_used = settings.ollama_model if prefer_local else settings.ai_studio_model
         confidence_score = 0.5
         yield _stream_stage("synthesizing", "started")
         yield _stream_tool("synthesizing", "started")
@@ -1278,7 +1233,7 @@ async def run_graph_stream(
         llm_ttft_logged = False
         try:
             async for chunk in generate_stream(
-                syn_messages, prefer_local=prefer_local, settings=settings, voice_mode=voice_mode
+                syn_messages, prefer_local=prefer_local, settings=settings
             ):
                 if timeline and not llm_ttft_logged:
                     timeline.mark("llm_first_token", path="synthesize")
