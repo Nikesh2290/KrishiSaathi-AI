@@ -35,13 +35,13 @@ class QueryTimeline:
         self._t0 = time.perf_counter()
 
     def _base_extra(self) -> dict[str, Any]:
+        # request_id is injected on every LogRecord by config.logging record_factory;
+        # do not pass it in extra= or logging raises KeyError on overwrite.
         out: dict[str, Any] = {
             "farmer_id": self.farmer_id or None,
             "conversation_id": self.conversation_id,
             "device_intent": self.device_intent or None,
         }
-        if self.request_id:
-            out["request_id"] = self.request_id
         if self.voice_turn_id:
             out["voice_turn_id"] = self.voice_turn_id
         return out
