@@ -8,10 +8,12 @@ import re
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, File, Form, UploadFile
+from fastapi import APIRouter, File, Form, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
 from agent.graph import run_graph_stream
+from agent.timing import QueryTimeline
+from config.logging import request_id_var
 from agent.language import LanguageStyle, detect_language_style
 from config.settings import get_settings
 from db.persistence import persist_log_query, resolve_farmer_twin
@@ -202,7 +204,20 @@ def _smalltalk_reply(text: str, *, farmer_name: str | None = None) -> tuple[str,
 
 
 @router.post("/query/stream")
-async def post_query_stream(body: AgentRequest) -> StreamingResponse:
+async def post_query_stream(body: AgentRequest, request: Request) -> StreamingResponse:
+    voice_turn_id = (request.headers.get("x-voice-turn-id") or "").strip() or None
+    is_voice = (body.context.device_intent or "").lower() == "voice"
+    query_tl: QueryTimeline | None = None
+    if is_voice:
+        query_tl = QueryTimeline(
+            request_id=request_id_var.get(),
+            voice_turn_id=voice_turn_id,
+            farmer_id=body.farmer_id or "",
+            conversation_id=body.conversation_id,
+            device_intent="voice",
+        )
+        query_tl.mark("query_stream_handler_start", has_voice_turn_id=bool(voice_turn_id))
+
     async def event_stream():
         try:
             if not body.query.image_ref:
@@ -247,16 +262,26 @@ async def post_query_stream(body: AgentRequest) -> StreamingResponse:
                     yield f"data: {json.dumps(meta, ensure_ascii=False)}\n\n"
                     yield f"data: {json.dumps({'type': 'finish'}, ensure_ascii=False)}\n\n"
                     yield "data: [DONE]\n\n"
+                    if query_tl:
+                        query_tl.finish(outcome="smalltalk")
                     return
-            async for event_type, data in run_graph_stream(body):
+            first_sse = True
+            async for event_type, data in run_graph_stream(body, timeline=query_tl):
                 if event_type == "__done__":
+                    if query_tl:
+                        query_tl.finish(outcome="stream_done")
                     yield "data: [DONE]\n\n"
                 else:
+                    if query_tl and first_sse:
+                        query_tl.mark("first_sse_event", event_type=event_type)
+                        first_sse = False
                     payload: dict[str, object] = {"type": event_type}
                     if data is not None:
                         payload.update(data)
                     yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
         except KrishiHTTPException as exc:
+            if query_tl:
+                query_tl.mark("query_stream_error", error_code=exc.code.value)
             err_obj = {
                 "type": "error",
                 "errorText": str(exc.detail),
@@ -266,6 +291,8 @@ async def post_query_stream(body: AgentRequest) -> StreamingResponse:
             yield f"data: {json.dumps(err_obj, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
         except Exception as e:
+            if query_tl:
+                query_tl.mark("query_stream_exception", error=str(e)[:200])
             logger.exception("query/stream failed: %s", e)
             err_payload = json.dumps({"type": "error", "errorText": str(e)})
             yield f"data: {err_payload}\n\n"

@@ -21,6 +21,7 @@ from langgraph.graph import END, StateGraph
 
 from agent.connectivity_router import data_source_for_route, resolve_route
 from agent.gemma_client import generate, generate_stream
+from agent.timing import QueryTimeline
 from agent.history import build_chat_history_context
 from config.settings import Settings, get_settings
 from cache import context_builder
@@ -1065,6 +1066,8 @@ async def _emit_stream_preamble() -> AsyncIterator[tuple[str, dict[str, Any]]]:
 
 async def run_graph_stream(
     req: AgentRequest,
+    *,
+    timeline: QueryTimeline | None = None,
 ) -> AsyncIterator[tuple[str, Optional[dict[str, Any]]]]:
     """Yield AI SDK UI Data Stream parts as (part_type, extra_fields_or_None).
 
@@ -1076,7 +1079,12 @@ async def run_graph_stream(
     message_id = str(uuid4())
     text_id = f"txt_{uuid4().hex}"
 
+    if timeline:
+        timeline.mark("graph_start", query_len=len(req.query.text or ""))
+
     route = await resolve_route(req, settings)
+    if timeline:
+        timeline.mark("resolve_route_done", route=route)
     data_source = data_source_for_route(route, req)
     offline = data_source == "offline"
     prefer_local = route == "local"
@@ -1099,6 +1107,11 @@ async def run_graph_stream(
                     redis_ctx = loaded
             except Exception as e:
                 logger.warning("redis route prefetch skipped: %s", e)
+    if timeline:
+        timeline.mark(
+            "redis_prefetch_done",
+            hit=bool(redis_ctx.get("redis_context_hit")),
+        )
 
     if redis_ctx.get("redis_context_hit"):
         chat_hist = list(redis_ctx.get("prefetched_chat_history") or [])
@@ -1110,11 +1123,17 @@ async def run_graph_stream(
     else:
         chat_hist = await _load_chat_history(req, settings)
         twin = None
+    if timeline:
+        timeline.mark("chat_history_ready", turns=len(chat_hist))
 
     yield ("start", {"messageId": message_id})
+    if timeline:
+        timeline.mark("sse_start_yielded")
 
     has_image = bool(req.query.image_ref)
     needs_tools = has_image or not _is_nontool_query(req, chat_hist)
+    if timeline:
+        timeline.mark("path_selected", needs_tools=needs_tools, has_image=has_image)
 
     draft = ""
     tool_results: Dict[str, Any] = {}
@@ -1132,6 +1151,8 @@ async def run_graph_stream(
             twin = await resolve_farmer_twin(
                 req.farmer_id, req.context.connectivity, settings
             )
+            if timeline:
+                timeline.mark("resolve_farmer_twin_done", twin_found=twin is not None)
         voice_mode = (req.context.device_intent or "").lower() == "voice"
         messages = _build_direct_llm_messages(
             req, twin, chat_hist, voice_mode=voice_mode
@@ -1141,10 +1162,16 @@ async def run_graph_stream(
         yield _stream_tool("direct_llm", "started")
         yield _stream_tool("thinking", "done")
         yield ("text-start", {"id": text_id})
+        if timeline:
+            timeline.mark("llm_stream_start", path="direct_llm")
+        llm_ttft_logged = False
         try:
             async for chunk in generate_stream(
                 messages, prefer_local=prefer_local, settings=settings
             ):
+                if timeline and not llm_ttft_logged:
+                    timeline.mark("llm_first_token", path="direct_llm")
+                    llm_ttft_logged = True
                 draft += chunk
                 yield ("text-delta", {"id": text_id, "delta": chunk})
         except Exception as e:
@@ -1156,6 +1183,8 @@ async def run_graph_stream(
             draft = fb
             yield ("text-delta", {"id": text_id, "delta": fb})
         yield ("text-end", {"id": text_id})
+        if timeline:
+            timeline.mark("llm_stream_end", path="direct_llm", chars=len(draft))
         yield _stream_tool("direct_llm", "done")
         yield _stream_stage("direct_llm", "done")
     else:
@@ -1174,7 +1203,11 @@ async def run_graph_stream(
             settings=settings,
             cached_farmer_twin=twin,
         )
+        if timeline:
+            timeline.mark("tools_start", tools=[s.get("tool") for s in plan if isinstance(s, dict)])
         tool_results, tool_trace = await _run_tools(plan, ctx)
+        if timeline:
+            timeline.mark("tools_done", tool_trace=tool_trace)
         for nm in tool_trace:
             yield _stream_tool(nm, "done")
         yield _stream_stage("tools", "done")
@@ -1182,6 +1215,8 @@ async def run_graph_stream(
             twin = await resolve_farmer_twin(
                 req.farmer_id, req.context.connectivity, settings
             )
+            if timeline:
+                timeline.mark("resolve_farmer_twin_done", twin_found=twin is not None)
         syn_messages = _build_synthesis_messages(
             req, twin, tool_results, chat_hist
         )
@@ -1191,10 +1226,16 @@ async def run_graph_stream(
         yield _stream_tool("synthesizing", "started")
         yield _stream_tool("thinking", "done")
         yield ("text-start", {"id": text_id})
+        if timeline:
+            timeline.mark("llm_stream_start", path="synthesize")
+        llm_ttft_logged = False
         try:
             async for chunk in generate_stream(
                 syn_messages, prefer_local=prefer_local, settings=settings
             ):
+                if timeline and not llm_ttft_logged:
+                    timeline.mark("llm_first_token", path="synthesize")
+                    llm_ttft_logged = True
                 draft += chunk
                 yield ("text-delta", {"id": text_id, "delta": chunk})
         except Exception as e:
@@ -1206,6 +1247,8 @@ async def run_graph_stream(
             draft = fb
             yield ("text-delta", {"id": text_id, "delta": fb})
         yield ("text-end", {"id": text_id})
+        if timeline:
+            timeline.mark("llm_stream_end", path="synthesize", chars=len(draft))
         yield _stream_tool("synthesizing", "done")
         yield _stream_stage("synthesizing", "done")
 
@@ -1227,6 +1270,8 @@ async def run_graph_stream(
         fallback_hint=fallback_hint,  # type: ignore[arg-type]
     )
     resp.conversation_id = req.conversation_id
+    if timeline:
+        timeline.mark("persist_log_query_start")
     try:
         await persist_log_query(
             req.query.text,
@@ -1240,6 +1285,8 @@ async def run_graph_stream(
         )
     except Exception as e:
         logger.warning("log_query failed: %s", e)
+    if timeline:
+        timeline.mark("persist_log_query_done")
 
     yield ("data-metadata", _agent_response_metadata(resp))
     yield ("finish", {})
