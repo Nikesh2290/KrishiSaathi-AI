@@ -20,6 +20,8 @@ async def find_schemes(
     prefer_local: bool,
     offline_mode: bool,
     settings: Settings | None = None,
+    *,
+    voice_mode: bool = False,
 ) -> Dict[str, Any]:
     settings = settings or get_settings()
     retrieved: list = []
@@ -66,5 +68,7 @@ async def find_schemes(
             ),
         },
     ]
-    text = await generate(messages, prefer_local=prefer_local, settings=settings)
+    text = await generate(
+        messages, prefer_local=prefer_local, settings=settings, voice_mode=voice_mode
+    )
     return {"answer": text, "schemes": retrieved, "source": source}

@@ -83,6 +83,7 @@ async def analyze_image(
     settings: Settings | None = None,
     *,
     source_mime: str | None = None,
+    voice_mode: bool = False,
 ) -> Dict[str, Any]:
     settings = settings or get_settings()
     q = (user_query or "").strip()
@@ -112,6 +113,7 @@ async def analyze_image(
         prefer_local=prefer_local,
         settings=settings,
         image_mime=vision_mime,
+        voice_mode=voice_mode,
     )
     data = _parse_vision_json(_strip_json_fence(raw))
 
@@ -160,8 +162,12 @@ async def detect_disease(
     prefer_local: bool,
     settings: Settings | None = None,
     user_query: str = "",
+    *,
+    voice_mode: bool = False,
 ) -> Dict[str, Any]:
-    return await analyze_image(image_b64, user_query, prefer_local, settings)
+    return await analyze_image(
+        image_b64, user_query, prefer_local, settings, voice_mode=voice_mode
+    )
 
 
 async def detect_disease_bytes(
@@ -170,12 +176,19 @@ async def detect_disease_bytes(
     prefer_local,
     settings,
     user_query: str = "",
+    *,
+    voice_mode: bool = False,
 ):
     import base64
 
     b64 = base64.b64encode(data).decode("ascii")
     return await analyze_image(
-        b64, user_query, prefer_local, settings, source_mime=mime
+        b64,
+        user_query,
+        prefer_local,
+        settings,
+        source_mime=mime,
+        voice_mode=voice_mode,
     )
 
 
@@ -184,6 +197,8 @@ async def detect_disease_by_ref(
     prefer_local,
     settings,
     user_query: str = "",
+    *,
+    voice_mode: bool = False,
 ):
     if not image_ref:
         return {
@@ -205,5 +220,10 @@ async def detect_disease_by_ref(
             message="image_ref is unknown or expired",
         )
     return await detect_disease_bytes(
-        stored.data, stored.mime, prefer_local, settings, user_query=user_query
+        stored.data,
+        stored.mime,
+        prefer_local,
+        settings,
+        user_query=user_query,
+        voice_mode=voice_mode,
     )
