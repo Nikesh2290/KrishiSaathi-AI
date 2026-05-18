@@ -8,6 +8,7 @@ import logging
 import os
 import random
 import re
+import uuid
 from pathlib import Path
 from collections.abc import AsyncIterable
 from typing import Any, Optional
@@ -34,6 +35,7 @@ from db.persistence import resolve_farmer_twin
 from models.farmer import FarmerTwin
 from voice_agent.query_stream_client import iter_query_stream_events
 from voice_agent.stub_llm import KrishiStubLLM
+from voice_agent.timing import VoiceTimeline, new_turn_id, voice_timing_enabled
 
 # LiveKit CLI reads os.environ before connecting; load repo .env regardless of cwd.
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
@@ -362,18 +364,31 @@ class KrishiVoiceAgent(Agent):
         conversation_id: Optional[str],
         language: str,
         farmer_name: str | None = None,
+        session_id: str | None = None,
+        room_name: str | None = None,
     ) -> None:
         self._api_base = api_base.rstrip("/")
         self._farmer_id = farmer_id
         self._conversation_id = conversation_id
         self._language = language or "en"
         self._farmer_name = farmer_name
+        self._session_id = session_id
+        self._room_name = room_name
         super().__init__(
             instructions=(
                 "You are Krishi Saathi, an Indian agriculture assistant. "
                 "Answers are produced by the Krishi backend from the farmer's speech."
             ),
             llm=KrishiStubLLM(),
+        )
+
+    def _timeline(self, turn_id: str) -> VoiceTimeline:
+        return VoiceTimeline(
+            turn_id=turn_id,
+            session_id=self._session_id,
+            farmer_id=self._farmer_id,
+            conversation_id=self._conversation_id,
+            room=self._room_name,
         )
 
     async def llm_node(
@@ -383,13 +398,25 @@ class KrishiVoiceAgent(Agent):
         model_settings: ModelSettings,
     ) -> AsyncIterable[str]:
         del tools, model_settings
+        turn_id = new_turn_id()
+        tl = self._timeline(turn_id)
+        tl.mark("llm_node_start", voice_timing=voice_timing_enabled())
+
         user_text = _last_user_message_text(chat_ctx)
         if not user_text:
+            tl.mark("llm_node_abort", reason="empty_user_text")
             yield "Please say your farming question again."
             return
 
+        tl.mark(
+            "stt_text_ready",
+            user_text_len=len(user_text),
+            user_text_preview=user_text[:120],
+        )
+
         detected = detect_language_style(user_text)
         query_lang: str = detected
+        tl.mark("language_detected", query_lang=query_lang, detected_style=detected)
 
         payload: dict[str, Any] = {
             "farmer_id": self._farmer_id,
@@ -424,14 +451,21 @@ class KrishiVoiceAgent(Agent):
         sentence_buf = ""
         saw_answer_delta = False
         last_spoken_tail = ""
+        tts_chunk_count = 0
+        filler_events = 0
+        sse_event_count = 0
 
         try:
+            tl.mark("api_query_stream_start", api_base=self._api_base)
             async with httpx.AsyncClient(timeout=120.0) as client:
                 async for obj in iter_query_stream_events(
                     client,
                     api_base=self._api_base,
                     payload=payload,
+                    timeline=tl,
+                    turn_id=turn_id,
                 ):
+                    sse_event_count += 1
                     otype = obj.get("type")
                     if otype == "data-stage":
                         data = obj.get("data") if isinstance(obj.get("data"), dict) else {}
@@ -442,6 +476,13 @@ class KrishiVoiceAgent(Agent):
                         phrase = _pick_variant(variants, self._farmer_name, spoken_fillers)
                         if phrase:
                             filler_count += 1
+                            filler_events += 1
+                            tl.mark(
+                                "filler_yield_stage",
+                                stage=stage,
+                                phrase_chars=len(phrase),
+                                filler_index=filler_count,
+                            )
                             yield phrase + " "
                     elif otype == "data-tool":
                         data = obj.get("data") if isinstance(obj.get("data"), dict) else {}
@@ -457,22 +498,45 @@ class KrishiVoiceAgent(Agent):
                                 phrase = _try_emit_tool_filler("synthesizing")
                                 if phrase:
                                     filler_count += 1
+                                    filler_events += 1
+                                    tl.mark(
+                                        "filler_yield_tool",
+                                        tool=tool,
+                                        phrase_chars=len(phrase),
+                                        filler_index=filler_count,
+                                    )
                                     yield phrase + " "
                             continue
                         if tool in _TOOL_COUNT_TOOLS and filler_count < 1:
                             phrase = _try_emit_tool_filler(tool)
                             if phrase:
                                 filler_count += 1
+                                filler_events += 1
+                                tl.mark(
+                                    "filler_yield_tool",
+                                    tool=tool,
+                                    phrase_chars=len(phrase),
+                                    filler_index=filler_count,
+                                )
                                 yield phrase + " "
                         elif tool == "thinking" and filler_count < 1:
                             phrase = _try_emit_tool_filler("thinking")
                             if phrase:
                                 filler_count += 1
+                                filler_events += 1
+                                tl.mark(
+                                    "filler_yield_tool",
+                                    tool="thinking",
+                                    phrase_chars=len(phrase),
+                                    filler_index=filler_count,
+                                )
                                 yield phrase + " "
                     elif otype == "text-delta":
                         delta = str(obj.get("delta") or "")
                         if not delta:
                             continue
+                        if not saw_answer_delta:
+                            tl.mark("first_answer_token", delta_chars=len(delta))
                         saw_answer_delta = True
                         sentence_buf += delta
                         while True:
@@ -494,19 +558,46 @@ class KrishiVoiceAgent(Agent):
                             if os.getenv("VOICE_DEBUG_CHUNK"):
                                 logger.debug("VOICE chunk_out=%r rest=%r", chunk, sentence_buf[:120])
                             last_spoken_tail = chunk[-80:] if len(chunk) > 80 else chunk
+                            tts_chunk_count += 1
+                            if tts_chunk_count == 1:
+                                tl.mark(
+                                    "first_tts_text_yield",
+                                    chunk_chars=len(chunk),
+                                    buf_remaining=len(sentence_buf),
+                                )
+                            tl.mark(
+                                "tts_text_yield",
+                                chunk_index=tts_chunk_count,
+                                chunk_chars=len(chunk),
+                                buf_remaining=len(sentence_buf),
+                            )
                             yield chunk + " "
                     elif otype == "error":
                         err_txt = str(obj.get("errorText") or "unknown error")
+                        tl.mark("api_stream_error", error_text=err_txt[:200])
                         logger.warning("query stream error from API: %s", err_txt)
                         apology = (
                             "Maafi, abhi madad nahi ho payi. Dobara boliye."
                             if lang_key == "hi"
                             else "Sorry, I couldn't help right now. Please try again."
                         )
+                        tl.finish(
+                            outcome="api_error",
+                            sse_events=sse_event_count,
+                            tts_chunks=tts_chunk_count,
+                            fillers=filler_events,
+                        )
                         yield apology
                         return
+            tl.mark(
+                "api_query_stream_end",
+                sse_events=sse_event_count,
+                saw_answer_delta=saw_answer_delta,
+            )
         except Exception:
+            tl.mark("api_query_stream_failed")
             logger.exception("Krishi POST %s failed", f"{self._api_base}/api/v1/query/stream")
+            tl.finish(outcome="http_exception", sse_events=sse_event_count)
             yield (
                 "Sorry, the assistant is temporarily unavailable. Please try again in a moment."
                 if lang_key != "hi"
@@ -518,17 +609,40 @@ class KrishiVoiceAgent(Agent):
         if tail:
             tail = _strip_chunk_overlap(tail, last_spoken_tail)
             if tail:
+                tts_chunk_count += 1
+                tl.mark(
+                    "tts_text_yield_tail",
+                    chunk_chars=len(tail),
+                    chunk_index=tts_chunk_count,
+                )
                 yield tail + " "
         elif not saw_answer_delta:
+            tl.mark("no_answer_tokens")
             yield (
                 "I could not find an answer. Please try asking in simpler words."
                 if lang_key != "hi"
                 else "Jawaab nahi mil paya. Seedha sawal dubara boliye."
             )
+        tl.finish(
+            outcome="ok",
+            sse_events=sse_event_count,
+            tts_chunks=tts_chunk_count,
+            fillers=filler_events,
+            answer_received=saw_answer_delta,
+        )
 
 
 async def entrypoint(ctx: JobContext) -> None:
+    session_id = f"vsess_{uuid.uuid4().hex[:10]}"
+    session_tl = VoiceTimeline(
+        turn_id=session_id,
+        session_id=session_id,
+        room=ctx.room.name,
+    )
+    session_tl.mark("entrypoint_start")
+
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
+    session_tl.mark("livekit_connected")
     _register_lk_agent_request_sink(ctx.room)
 
     try:
@@ -536,8 +650,10 @@ async def entrypoint(ctx: JobContext) -> None:
     except RuntimeError as exc:
         # Room disconnected before any participant arrived (e.g. client dropped early).
         # This is a normal transient event — log at INFO and exit cleanly.
+        session_tl.mark("participant_wait_failed", error=str(exc)[:200])
         logger.info("Room disconnected before participant arrived, skipping job: %s", exc)
         return
+    session_tl.mark("participant_joined", identity=participant.identity)
     meta = _parse_farmer_meta(participant.metadata)
 
     farmer_id = str(meta.get("farmer_id") or "").strip() or os.getenv(
@@ -552,9 +668,10 @@ async def entrypoint(ctx: JobContext) -> None:
 
     raw_conv = meta.get("conversation_id")
     if raw_conv is None or raw_conv == "":
-        conv = None
+        conv = str(uuid.uuid4())
+        logger.info("voice session: no conversation_id in metadata, using %s", conv)
     else:
-        conv = str(raw_conv).strip() or None
+        conv = str(raw_conv).strip() or str(uuid.uuid4())
     language = str(meta.get("language") or "en").strip() or "en"
 
     api_base = os.getenv("KRISHI_API_BASE_URL", "http://127.0.0.1:8000").strip()
@@ -570,6 +687,9 @@ async def entrypoint(ctx: JobContext) -> None:
     settings = get_settings()
     twin: FarmerTwin | None = None
     farmer_nm: str | None = None
+    session_tl.farmer_id = farmer_id
+    session_tl.conversation_id = conv
+    session_tl.mark("resolve_farmer_twin_start")
     try:
         twin = await asyncio.wait_for(
             resolve_farmer_twin(farmer_id, "online", settings),
@@ -577,19 +697,32 @@ async def entrypoint(ctx: JobContext) -> None:
         )
         if twin and twin.name.strip():
             farmer_nm = twin.name.strip()
+        session_tl.mark("resolve_farmer_twin_done", twin_found=twin is not None)
+    except asyncio.TimeoutError:
+        session_tl.mark("resolve_farmer_twin_timeout", timeout_s=2.0)
     except Exception:
+        session_tl.mark("resolve_farmer_twin_failed")
         logger.debug("resolve_farmer_twin for voice session failed", exc_info=True)
 
+    session_tl.mark("vad_load_start")
     vad = silero.VAD.load()
+    session_tl.mark("vad_load_done")
     dg_lang = _deepgram_stt_language(language)
+    session_tl.mark("deepgram_stt_init", stt_language=dg_lang)
     stt_model = deepgram.STT(
         model="nova-3",
         language=dg_lang,
         detect_language=False,
         api_key=dg_key,
     )
+    session_tl.mark("deepgram_tts_init", tts_model=tts_model_name)
     tts_model = deepgram.TTS(api_key=dg_key, model=tts_model_name)
 
+    session_tl.mark(
+        "agent_session_create",
+        endpointing_min_s=0.4,
+        endpointing_max_s=3.0,
+    )
     session = AgentSession(
         vad=vad,
         stt=stt_model,
@@ -605,23 +738,33 @@ async def entrypoint(ctx: JobContext) -> None:
         conversation_id=conv,
         language=language,
         farmer_name=farmer_nm,
+        session_id=session_id,
+        room_name=ctx.room.name,
     )
     room_opts = room_io.RoomOptions(participant_identity=participant.identity)
+    session_tl.mark("agent_session_start")
     try:
         await session.start(agent, room=ctx.room, room_options=room_opts)
     except RuntimeError as exc:
+        session_tl.mark("agent_session_start_failed", error=str(exc)[:200])
         logger.info("Session could not start (room already gone?): %s", exc)
         return
+    session_tl.mark("agent_session_ready")
 
     welcome_key = f"{ctx.room.name}:{farmer_id}"
     if welcome_key not in _WELCOME_SENT_KEYS:
         welcome_text = _build_voice_welcome(twin, language)
+        session_tl.mark("welcome_tts_start", welcome_chars=len(welcome_text))
         try:
             handle = session.say(welcome_text, add_to_chat_ctx=False)
             await handle.wait_for_playout()
+            session_tl.mark("welcome_tts_done")
         except Exception:
+            session_tl.mark("welcome_tts_failed")
             logger.warning("voice welcome TTS failed", exc_info=True)
         _WELCOME_SENT_KEYS.add(welcome_key)
+    else:
+        session_tl.mark("welcome_tts_skipped", reason="already_sent")
 
 
 if __name__ == "__main__":

@@ -4,11 +4,29 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+import time
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
+if TYPE_CHECKING:
+    from voice_agent.timing import VoiceTimeline
+
 logger = logging.getLogger(__name__)
+
+_SSE_LOG_TYPES = frozenset(
+    {
+        "start",
+        "data-stage",
+        "data-tool",
+        "text-start",
+        "text-delta",
+        "text-end",
+        "data-metadata",
+        "finish",
+        "error",
+    }
+)
 
 
 def _sse_block_to_data_str(block: str) -> str:
@@ -136,25 +154,64 @@ async def collect_text_from_query_stream(
     return text
 
 
+def _log_sse_event(timeline: VoiceTimeline | None, obj: dict[str, Any], *, first_sse: bool) -> None:
+    if timeline is None:
+        return
+    otype = str(obj.get("type") or "")
+    extra: dict[str, Any] = {"sse_type": otype}
+    if first_sse:
+        extra["first_sse"] = True
+    if otype == "data-stage":
+        data = obj.get("data") if isinstance(obj.get("data"), dict) else {}
+        extra["stage"] = data.get("stage")
+        extra["status"] = data.get("status")
+    elif otype == "data-tool":
+        data = obj.get("data") if isinstance(obj.get("data"), dict) else {}
+        extra["tool"] = data.get("tool")
+        extra["status"] = data.get("status")
+    elif otype == "text-delta":
+        delta = str(obj.get("delta") or "")
+        extra["delta_chars"] = len(delta)
+    elif otype == "error":
+        extra["error_text"] = str(obj.get("errorText") or "")[:200]
+    if otype in _SSE_LOG_TYPES:
+        timeline.mark(f"sse_{otype}", **extra)
+
+
 async def iter_query_stream_events(
     client: httpx.AsyncClient,
     *,
     api_base: str,
     payload: dict[str, Any],
+    timeline: VoiceTimeline | None = None,
+    turn_id: str | None = None,
 ):
     """Yield each SSE JSON event as it arrives (streaming).
 
     Skips non-dict payloads. Stops after ``[DONE]`` or an ``error`` frame.
     """
     url = f"{api_base.rstrip('/')}/api/v1/query/stream"
+    headers: dict[str, str] = {"Accept": "text/event-stream"}
+    if turn_id:
+        headers["X-Voice-Turn-Id"] = turn_id
     buf = ""
+    saw_first_sse = False
+    http_t0 = time.perf_counter()
+    if timeline:
+        timeline.mark("http_stream_open", api_url=url)
     async with client.stream(
         "POST",
         url,
         json=payload,
-        headers={"Accept": "text/event-stream"},
+        headers=headers,
         timeout=120.0,
     ) as r:
+        if timeline:
+            timeline.mark(
+                "http_response_headers",
+                status_code=r.status_code,
+                ms_http_connect=round((time.perf_counter() - http_t0) * 1000, 2),
+            )
         r.raise_for_status()
         async for line in r.aiter_lines():
             if line is None:
@@ -162,11 +219,25 @@ async def iter_query_stream_events(
             buf += line + "\n"
             buf, status, objs = _consume_buffer_events(buf)
             for obj in objs:
+                first = not saw_first_sse
+                if first:
+                    saw_first_sse = True
+                _log_sse_event(timeline, obj, first_sse=first)
                 yield obj
             if status == "done":
+                if timeline:
+                    timeline.mark("sse_done")
                 return
             if status == "error":
+                if timeline:
+                    timeline.mark("sse_error_frame")
                 return
         buf, status, objs = _consume_buffer_events(buf)
         for obj in objs:
+            first = not saw_first_sse
+            if first:
+                saw_first_sse = True
+            _log_sse_event(timeline, obj, first_sse=first)
             yield obj
+        if timeline and status == "done":
+            timeline.mark("sse_done")
