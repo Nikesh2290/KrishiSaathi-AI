@@ -21,6 +21,7 @@ class FakeGemmaClient:
         prefer_local: bool = False,
         settings: Any = None,
         heavy: bool = False,
+        voice_mode: bool = False,
     ) -> str:
         self.calls.append({"messages": list(messages), "heavy": heavy})
         first_system = next(
@@ -44,6 +45,7 @@ class FakeGemmaClient:
         settings: Any = None,
         *,
         image_mime: str = "image/jpeg",
+        voice_mode: bool = False,
     ) -> str:
         self.calls.append({"vision": True, "bytes": len(image_bytes), "image_mime": image_mime})
         return json.dumps(

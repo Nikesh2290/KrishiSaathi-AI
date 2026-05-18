@@ -42,7 +42,7 @@ def test_is_nontool_false_with_image_ref():
 async def test_plan_voice_uses_short_prompt(monkeypatch):
     calls: list[list[dict]] = []
 
-    async def fake_generate(messages, prefer_local=False, settings=None):
+    async def fake_generate(messages, prefer_local=False, settings=None, **kwargs):
         calls.append(messages)
         return json.dumps(
             {"tools": [{"tool": "climate", "params": {"lat": 30.0, "lng": 75.0, "crop": "wheat"}}]}

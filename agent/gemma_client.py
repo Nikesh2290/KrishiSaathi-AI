@@ -51,6 +51,7 @@ def _ollama_messages_payload(
     messages: Sequence[Union[dict, BaseMessage]],
     images: Optional[List[str]] = None,
     stream: bool = False,
+    voice_mode: bool = False,
 ) -> tuple[str, dict]:
     """Build POST body for Ollama /api/chat."""
     url = f"{settings.ollama_base_url.rstrip('/')}/api/chat"
@@ -64,7 +65,8 @@ def _ollama_messages_payload(
     if images:
         last = o_msgs[-1]
         last["images"] = images
-    payload = {"model": settings.ollama_model, "messages": o_msgs, "stream": stream}
+    model = settings.ollama_model if voice_mode else settings.ollama_chat_model
+    payload = {"model": model, "messages": o_msgs, "stream": stream}
     return url, payload
 
 
@@ -72,8 +74,9 @@ async def _ollama_chat(
     settings: Settings,
     messages: Sequence[Union[dict, BaseMessage]],
     images: Optional[List[str]] = None,
+    voice_mode: bool = False,
 ) -> str:
-    url, payload = _ollama_messages_payload(settings, messages, images)
+    url, payload = _ollama_messages_payload(settings, messages, images, voice_mode=voice_mode)
     client = get_ollama_http()
     r = await client.post(url, json=payload)
     r.raise_for_status()
@@ -85,9 +88,10 @@ async def _ollama_chat_stream(
     settings: Settings,
     messages: Sequence[Union[dict, BaseMessage]],
     images: Optional[List[str]] = None,
+    voice_mode: bool = False,
 ) -> AsyncIterator[str]:
     """Stream incremental assistant text chunks from Ollama /api/chat (NDJSON)."""
-    url, payload = _ollama_messages_payload(settings, messages, images, stream=True)
+    url, payload = _ollama_messages_payload(settings, messages, images, stream=True, voice_mode=voice_mode)
     client = get_ollama_http()
     async with client.stream("POST", url, json=payload) as r:
         r.raise_for_status()
@@ -108,10 +112,19 @@ async def _ollama_chat_stream(
                 break
 
 
-def _studio_llm(settings: Settings, heavy: bool = False) -> ChatGoogleGenerativeAI:
+def _resolve_studio_model(settings: Settings, *, heavy: bool = False, voice_mode: bool = False) -> str:
+    """Pick AI Studio model: voice (E4B) < chat (26B) < heavy (31B, chat escalation only)."""
+    if heavy and not voice_mode:
+        return settings.ai_studio_model_heavy
+    if voice_mode:
+        return settings.ai_studio_voice_model
+    return settings.ai_studio_model
+
+
+def _studio_llm(settings: Settings, heavy: bool = False, voice_mode: bool = False) -> ChatGoogleGenerativeAI:
     if not settings.google_api_key:
         raise RuntimeError("GOOGLE_AI_STUDIO_KEY not set")
-    model = settings.ai_studio_model_heavy if heavy else settings.ai_studio_model
+    model = _resolve_studio_model(settings, heavy=heavy, voice_mode=voice_mode)
     return ChatGoogleGenerativeAI(
         model=model,
         google_api_key=settings.google_api_key,
@@ -124,14 +137,15 @@ async def generate(
     prefer_local: bool = False,
     settings: Optional[Settings] = None,
     heavy: bool = False,
+    voice_mode: bool = False,
 ) -> str:
     settings = settings or get_settings()
     if prefer_local:
         try:
-            return await _ollama_chat(settings, messages)
+            return await _ollama_chat(settings, messages, voice_mode=voice_mode)
         except Exception as e:
             logger.warning("Ollama generate failed, falling back to AI Studio: %s", e)
-    llm = _studio_llm(settings, heavy=heavy)
+    llm = _studio_llm(settings, heavy=heavy, voice_mode=voice_mode)
     lc = _to_lc_messages(messages)
     resp = await llm.ainvoke(lc)
     return str(resp.content)
@@ -142,6 +156,7 @@ async def generate_stream(
     prefer_local: bool = False,
     settings: Optional[Settings] = None,
     heavy: bool = False,
+    voice_mode: bool = False,
 ) -> AsyncIterator[str]:
     """Yield text chunks from Ollama (stream) or Gemini (LangChain astream).
 
@@ -151,12 +166,12 @@ async def generate_stream(
     settings = settings or get_settings()
     if prefer_local:
         try:
-            async for chunk in _ollama_chat_stream(settings, messages):
+            async for chunk in _ollama_chat_stream(settings, messages, voice_mode=voice_mode):
                 yield chunk
             return
         except Exception as e:
             logger.warning("Ollama generate_stream failed, falling back to AI Studio: %s", e)
-    llm = _studio_llm(settings, heavy=heavy)
+    llm = _studio_llm(settings, heavy=heavy, voice_mode=voice_mode)
     lc = _to_lc_messages(messages)
     async for chunk in llm.astream(lc):
         raw = getattr(chunk, "content", None)
@@ -185,6 +200,7 @@ async def generate_with_vision(
     settings: Optional[Settings] = None,
     *,
     image_mime: str = "image/jpeg",
+    voice_mode: bool = False,
 ) -> str:
     """Multimodal: image + text.
 
@@ -204,6 +220,7 @@ async def generate_with_vision(
                     {"role": "user", "content": user_text},
                 ],
                 images=[image_b64],
+                voice_mode=voice_mode,
             )
         except Exception as e:
             logger.warning("Ollama vision failed, trying AI Studio: %s", e)
@@ -217,10 +234,12 @@ async def generate_with_vision(
     if not settings.google_api_key:
         raise RuntimeError("GOOGLE_AI_STUDIO_KEY not set")
 
+    studio_model = _resolve_studio_model(settings, voice_mode=voice_mode)
     logger.info(
-        "vision → AI Studio model=%s image_bytes=%d",
-        settings.ai_studio_model,
+        "vision → AI Studio model=%s image_bytes=%d voice_mode=%s",
+        studio_model,
         len(raw_bytes),
+        voice_mode,
     )
 
     if not image_mime or "/" not in image_mime:
@@ -228,7 +247,7 @@ async def generate_with_vision(
 
     client = _genai.Client(api_key=settings.google_api_key)
     response = await client.aio.models.generate_content(
-        model=settings.ai_studio_model,
+        model=studio_model,
         contents=[
             _gtypes.Part.from_bytes(data=raw_bytes, mime_type=image_mime),
             _gtypes.Part(text=user_text),

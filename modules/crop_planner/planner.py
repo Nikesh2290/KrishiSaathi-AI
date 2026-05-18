@@ -61,6 +61,8 @@ async def recommend_async(
     water_source: str,
     prefer_local: bool,
     settings: Settings | None = None,
+    *,
+    voice_mode: bool = False,
 ) -> Dict[str, Any]:
     base = recommend(soil, state, season, water_source, prefer_local, settings)
     settings = settings or get_settings()
@@ -84,7 +86,9 @@ async def recommend_async(
         },
     ]
     try:
-        rationale = await generate(msgs, prefer_local=prefer_local, settings=settings)
+        rationale = await generate(
+            msgs, prefer_local=prefer_local, settings=settings, voice_mode=voice_mode
+        )
     except Exception:
         rationale = base["rationale"]
     base["rationale"] = rationale

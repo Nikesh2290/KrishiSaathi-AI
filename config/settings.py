@@ -29,7 +29,12 @@ class Settings(BaseSettings):
     ai_studio_model: str = Field(
         default="gemma-4-26b-a4b-it",
         alias="AI_STUDIO_MODEL",
-        description="Primary Gemma 4 model on AI Studio (fast, MoE).",
+        description="Primary Gemma 4 model on AI Studio (chat: 26B MoE).",
+    )
+    ai_studio_voice_model: str = Field(
+        default="gemma-4-e4b-it",
+        alias="AI_STUDIO_VOICE_MODEL",
+        description="Gemma 4 model for voice mode on AI Studio (E4B, faster for real-time).",
     )
     ai_studio_model_heavy: str = Field(
         default="gemma-4-31b-it",
@@ -39,7 +44,16 @@ class Settings(BaseSettings):
 
     # Ollama — server-side dev convenience only; production path is AI Studio
     ollama_base_url: str = Field(default="http://127.0.0.1:11434", alias="OLLAMA_BASE_URL")
-    ollama_model: str = Field(default="gemma-4-e4b-it", alias="OLLAMA_MODEL")
+    ollama_model: str = Field(
+        default="gemma-4-e4b-it",
+        alias="OLLAMA_MODEL",
+        description="Ollama model for voice mode (fast, E4B).",
+    )
+    ollama_chat_model: str = Field(
+        default="gemma-4-26b-it",
+        alias="OLLAMA_CHAT_MODEL",
+        description="Ollama model for chat mode (larger, more capable).",
+    )
 
     connectivity_mode: str = Field(default="auto", alias="CONNECTIVITY_MODE")
 
