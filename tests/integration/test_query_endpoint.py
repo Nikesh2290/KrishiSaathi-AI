@@ -160,7 +160,7 @@ def test_smalltalk_sse_personalized_and_tool_events(client, monkeypatch):
 def test_direct_llm_stream_parallel(monkeypatch, client):
     """Tier 2: general query skips planner tools path when mocked LLM streams."""
 
-    async def fake_gs(_messages, prefer_local=False, settings=None, **kwargs):
+    async def fake_gs(_messages, prefer_local=False, settings=None):
         yield "Paris "
         yield "is the capital."
 

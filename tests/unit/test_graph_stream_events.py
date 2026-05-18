@@ -19,7 +19,7 @@ async def _collect_stream(req: AgentRequest) -> list[tuple[str, dict | None]]:
 
 @pytest.mark.asyncio
 async def test_stream_emits_routing_thinking_and_direct_llm(monkeypatch):
-    async def fake_gs(_messages, prefer_local=False, settings=None, **kwargs):
+    async def fake_gs(_messages, prefer_local=False, settings=None):
         yield "ok"
 
     monkeypatch.setattr("agent.graph.generate_stream", fake_gs)
@@ -48,7 +48,7 @@ async def test_stream_emits_routing_thinking_and_direct_llm(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_stream_tool_path_emits_named_tools(monkeypatch):
-    async def fake_gs(_messages, prefer_local=False, settings=None, **kwargs):
+    async def fake_gs(_messages, prefer_local=False, settings=None):
         yield "rain likely"
 
     async def fake_tools(plan, ctx):
