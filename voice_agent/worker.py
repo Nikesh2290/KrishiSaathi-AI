@@ -754,9 +754,8 @@ async def entrypoint(ctx: JobContext) -> None:
     except RuntimeError as exc:
         session_tl.mark("agent_session_start_failed", error=str(exc)[:200])
         logger.info("Session could not start (room already gone?): %s", exc)
-        return
-    finally:
         await stream_client.aclose()
+        return
     session_tl.mark("agent_session_ready")
 
     welcome_key = f"{ctx.room.name}:{farmer_id}"

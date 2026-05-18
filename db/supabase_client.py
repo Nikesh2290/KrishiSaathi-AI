@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT = httpx.Timeout(8.0, connect=5.0)
 _SYNC_TIMEOUT = httpx.Timeout(8.0, connect=5.0)
+# Large batch upserts can exceed default read timeout; background sync only.
+_SCHEME_VECTORS_UPSERT_TIMEOUT = httpx.Timeout(120.0, connect=15.0)
 
 _SUPABASE_LIMITS = httpx.Limits(max_connections=50, max_keepalive_connections=20)
 _supabase_http: httpx.AsyncClient | None = None
@@ -502,7 +504,12 @@ async def upsert_scheme_vector_rows(
             prepared["embedding"] = _to_json_float_list(prepared["embedding"])
         payload_rows.append(prepared)
     client = get_supabase_http()
-    r = await client.post(url, headers=headers, json=payload_rows)
+    r = await client.post(
+        url,
+        headers=headers,
+        json=payload_rows,
+        timeout=_SCHEME_VECTORS_UPSERT_TIMEOUT,
+    )
     if r.status_code >= 400:
         logger.warning("upsert_scheme_vector_rows: %s %s", r.status_code, r.text[:500])
         raise RuntimeError(r.text[:500])
