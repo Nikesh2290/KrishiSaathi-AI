@@ -48,15 +48,29 @@ async def qstash_persist_query(request: Request) -> Dict[str, Any]:
     sqlite_row_id = int(payload.get("sqlite_row_id"))
     ts = payload.get("sqlite_timestamp_unix")
     ts_i = int(ts) if ts is not None else None
+    conversation_id = payload.get("conversation_id")
 
     settings = get_settings()
+
+    # Conversation metadata may not yet be synced to Supabase (async sync).
+    # Upsert a stub row first so the FK constraint on query_history is satisfied.
+    if conversation_id:
+        farmer_id = str(payload.get("farmer_id") or "")
+        if farmer_id:
+            try:
+                await supabase_client.upsert_conversation_metadata_remote(
+                    conversation_id, farmer_id, None, settings=settings
+                )
+            except Exception:
+                logger.warning("persist-query: stub conversation upsert failed", exc_info=True)
+
     await supabase_client.insert_query_history_remote(
         payload.get("query_text") or "",
         payload.get("intent") or "",
         payload.get("response") or "",
         payload.get("data_source") or "live",
         sqlite_timestamp_unix=ts_i,
-        conversation_id=payload.get("conversation_id"),
+        conversation_id=conversation_id,
         settings=settings,
     )
     await sqlite_client.mark_query_history_synced(sqlite_row_id, settings)
