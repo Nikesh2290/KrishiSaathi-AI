@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
@@ -15,13 +16,11 @@ from models.farmer import FarmerTwin
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT = httpx.Timeout(8.0, connect=5.0)
-_SYNC_TIMEOUT = httpx.Timeout(8.0, connect=5.0)
 # Large batch upserts can exceed default read timeout; background sync only.
 _SCHEME_VECTORS_UPSERT_TIMEOUT = httpx.Timeout(120.0, connect=15.0)
 
 _SUPABASE_LIMITS = httpx.Limits(max_connections=50, max_keepalive_connections=20)
 _supabase_http: httpx.AsyncClient | None = None
-_supabase_sync_http: httpx.Client | None = None
 
 
 def get_supabase_http() -> httpx.AsyncClient:
@@ -39,16 +38,6 @@ async def close_supabase_http() -> None:
     if _supabase_http is not None:
         await _supabase_http.aclose()
         _supabase_http = None
-
-
-def get_supabase_sync_http() -> httpx.Client:
-    global _supabase_sync_http
-    if _supabase_sync_http is None:
-        _supabase_sync_http = httpx.Client(
-            timeout=_SYNC_TIMEOUT,
-            limits=_SUPABASE_LIMITS,
-        )
-    return _supabase_sync_http
 
 
 def _svc_key(settings: Settings) -> str:
@@ -448,13 +437,13 @@ async def delete_conversation_remote(
         )
 
 
-def _match_schemes_via_http(settings: Settings, query_embedding: List[float], k: int) -> List[Dict[str, Any]]:
-    """Sync httpx wrapper for embedding path (runs in threadpool if needed)."""
+async def _match_schemes_via_http_async(settings: Settings, query_embedding: List[float], k: int) -> List[Dict[str, Any]]:
+    """Async httpx call to Supabase RPC (offloads embedding to thread if needed upstream)."""
     url = _join_rest(settings, "rpc/match_scheme_vectors")
     headers = _headers_svc(settings)
     body = {"query_embedding": _to_json_float_list(query_embedding), "match_count": k}
-    client = get_supabase_sync_http()
-    r = client.post(url, headers=headers, json=body)
+    client = get_supabase_http()
+    r = await client.post(url, headers=headers, json=body)
     if r.status_code >= 400:
         logger.warning("match_scheme_vectors RPC: %s %s", r.status_code, r.text[:300])
         return []
@@ -473,18 +462,21 @@ def _match_schemes_via_http(settings: Settings, query_embedding: List[float], k:
     return out
 
 
-def search_schemes_vector_remote_sync(
+def _embed_query_sync(query: str) -> List[float]:
+    """CPU-bound DefaultEmbeddingFunction; call via asyncio.to_thread."""
+    from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+    return list(DefaultEmbeddingFunction()([query])[0])
+
+
+async def search_schemes_vector_remote_async(
     query: str, k: int = 5, settings: Optional[Settings] = None
 ) -> List[Dict[str, Any]]:
-    """Sync path using Chroma default embedding + RPC (used from vector_store.search sync API)."""
-    from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
-
+    """Async path: runs CPU-bound embedding in thread, then async Supabase RPC."""
     settings = settings or get_settings()
     if not settings.supabase_db_configured:
         return []
-    ef = DefaultEmbeddingFunction()
-    emb = ef([query])[0]
-    return _match_schemes_via_http(settings, emb, k)
+    emb = await asyncio.to_thread(_embed_query_sync, query)
+    return await _match_schemes_via_http_async(settings, emb, k)
 
 
 async def upsert_scheme_vector_rows(

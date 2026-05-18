@@ -10,7 +10,7 @@ import pytest
 from PIL import Image
 
 from modules.vision import engine as vision_engine
-from modules.vision.tagger import validate_and_resize_b64
+from modules.vision.tagger import validate_and_resize_b64_async
 
 
 def _tiny_jpeg_b64() -> str:
@@ -19,9 +19,10 @@ def _tiny_jpeg_b64() -> str:
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-def test_bad_base64():
+@pytest.mark.asyncio
+async def test_bad_base64():
     with pytest.raises(ValueError):
-        validate_and_resize_b64("not!!!")
+        await validate_and_resize_b64_async("not!!!")
 
 
 @pytest.mark.asyncio

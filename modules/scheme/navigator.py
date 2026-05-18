@@ -35,11 +35,11 @@ async def find_schemes(
                 if uw:
                     retrieved, source = uw, "upstash_vector"
             if not retrieved and settings.supabase_db_configured:
-                r = vector_store.search(query, k=5, use_supabase=True)
+                r = await vector_store.search(query, k=5, use_supabase=True)
                 if r:
                     retrieved, source = r, "supabase_pgvector"
             if not retrieved:
-                retrieved = vector_store.search(query, k=5, use_supabase=False)
+                retrieved = await vector_store.search(query, k=5, use_supabase=False)
                 if retrieved:
                     source = "chroma"
         except Exception as e:
