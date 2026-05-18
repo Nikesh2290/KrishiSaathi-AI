@@ -34,6 +34,10 @@ def schemes_index_key() -> str:
     return "schemes:index"
 
 
+def warmup_meta_key(name: str) -> str:
+    return f"warmup:{name}"
+
+
 def conversations_list_key(farmer_id: str) -> str:
     return f"conv_list:{farmer_id}"
 

@@ -773,6 +773,8 @@ async def entrypoint(ctx: JobContext) -> None:
     else:
         session_tl.mark("welcome_tts_skipped", reason="already_sent")
 
+    await stream_client.aclose()
+
 
 if __name__ == "__main__":
     cli.run_app(
