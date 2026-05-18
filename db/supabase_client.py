@@ -14,7 +14,39 @@ from models.farmer import FarmerTwin
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_TIMEOUT = httpx.Timeout(45.0, connect=10.0)
+_DEFAULT_TIMEOUT = httpx.Timeout(8.0, connect=5.0)
+_SYNC_TIMEOUT = httpx.Timeout(8.0, connect=5.0)
+
+_SUPABASE_LIMITS = httpx.Limits(max_connections=50, max_keepalive_connections=20)
+_supabase_http: httpx.AsyncClient | None = None
+_supabase_sync_http: httpx.Client | None = None
+
+
+def get_supabase_http() -> httpx.AsyncClient:
+    global _supabase_http
+    if _supabase_http is None:
+        _supabase_http = httpx.AsyncClient(
+            timeout=_DEFAULT_TIMEOUT,
+            limits=_SUPABASE_LIMITS,
+        )
+    return _supabase_http
+
+
+async def close_supabase_http() -> None:
+    global _supabase_http
+    if _supabase_http is not None:
+        await _supabase_http.aclose()
+        _supabase_http = None
+
+
+def get_supabase_sync_http() -> httpx.Client:
+    global _supabase_sync_http
+    if _supabase_sync_http is None:
+        _supabase_sync_http = httpx.Client(
+            timeout=_SYNC_TIMEOUT,
+            limits=_SUPABASE_LIMITS,
+        )
+    return _supabase_sync_http
 
 
 def _svc_key(settings: Settings) -> str:
@@ -77,8 +109,8 @@ class AuthSessionInfo:
 
 
 async def _post_json_expect_ok(url: str, headers: Dict[str, str], body: Dict[str, Any]) -> Dict[str, Any]:
-    async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
-        r = await client.post(url, headers=headers, json=body)
+    client = get_supabase_http()
+    r = await client.post(url, headers=headers, json=body)
     if r.status_code >= 400:
         try:
             err = r.json()
@@ -168,8 +200,8 @@ async def get_farmer_twin_remote(farmer_id: str, settings: Optional[Settings] = 
     url = _join_rest(settings, "farmer_twin") + f"?{q}"
     headers = dict(_headers_svc(settings))
     try:
-        async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
-            r = await client.get(url, headers=headers)
+        client = get_supabase_http()
+        r = await client.get(url, headers=headers)
         if r.status_code == 404 or r.status_code == 406:
             return None
         if r.status_code >= 400:
@@ -196,8 +228,8 @@ async def upsert_farmer_twin_remote(twin: FarmerTwin, settings: Optional[Setting
     headers = dict(_headers_svc(settings))
     headers["Prefer"] = "resolution=merge-duplicates"
     url = _join_rest(settings, "farmer_twin")
-    async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
-        r = await client.post(url, headers=headers, json=row)
+    client = get_supabase_http()
+    r = await client.post(url, headers=headers, json=row)
     if r.status_code >= 400:
         txt = ""
         try:
@@ -243,8 +275,8 @@ async def upsert_conversation_metadata_remote(
     headers = dict(_headers_svc(settings))
     headers["Prefer"] = "resolution=merge-duplicates"
     url = _join_rest(settings, "conversation_metadata?on_conflict=conversation_id")
-    async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
-        r = await client.post(url, headers=headers, json=row)
+    client = get_supabase_http()
+    r = await client.post(url, headers=headers, json=row)
     if r.status_code >= 400:
         raise RuntimeError(r.text[:500])
 
@@ -266,8 +298,8 @@ async def get_conversations_by_farmer_remote(
     )
     url = _join_rest(settings, "conversation_metadata") + f"?{q}"
     headers = dict(_headers_svc(settings))
-    async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
-        r = await client.get(url, headers=headers)
+    client = get_supabase_http()
+    r = await client.get(url, headers=headers)
     if r.status_code >= 400:
         logger.warning("get_conversations_by_farmer_remote: %s %s", r.status_code, r.text[:200])
         return []
@@ -296,8 +328,8 @@ async def get_conversation_metadata_remote(
     )
     url = _join_rest(settings, "conversation_metadata") + f"?{q}"
     headers = dict(_headers_svc(settings))
-    async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
-        r = await client.get(url, headers=headers)
+    client = get_supabase_http()
+    r = await client.get(url, headers=headers)
     if r.status_code >= 400:
         logger.warning("get_conversation_metadata_remote: %s %s", r.status_code, r.text[:200])
         return None
@@ -338,8 +370,8 @@ async def insert_query_history_remote(
         row["conversation_id"] = conversation_id
     headers = dict(_headers_svc(settings))
     url = _join_rest(settings, "query_history")
-    async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
-        r = await client.post(url, headers=headers, json=row)
+    client = get_supabase_http()
+    r = await client.post(url, headers=headers, json=row)
     if r.status_code >= 400:
         raise RuntimeError(r.text[:500])
 
@@ -372,8 +404,8 @@ async def get_query_history_by_conversation_remote(
     q = urlencode({"conversation_id": f"eq.{cid}", "select": "*"})
     url = _join_rest(settings, "query_history") + f"?{q}"
     headers = dict(_headers_svc(settings))
-    async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
-        r = await client.get(url, headers=headers)
+    client = get_supabase_http()
+    r = await client.get(url, headers=headers)
     if r.status_code >= 400:
         logger.warning("get_query_history_by_conversation_remote: %s %s", r.status_code, r.text[:200])
         return []
@@ -401,17 +433,17 @@ async def delete_conversation_remote(
     headers = dict(_headers_svc(settings))
     qh_url = _join_rest(settings, "query_history") + f"?{filt}"
     cm_url = _join_rest(settings, "conversation_metadata") + f"?{filt}"
-    async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
-        r1 = await client.delete(qh_url, headers=headers)
-        if r1.status_code >= 400:
-            raise RuntimeError(
-                r1.text[:500] if r1.text else f"delete query_history failed: {r1.status_code}"
-            )
-        r2 = await client.delete(cm_url, headers=headers)
-        if r2.status_code >= 400:
-            raise RuntimeError(
-                r2.text[:500] if r2.text else f"delete conversation_metadata failed: {r2.status_code}"
-            )
+    client = get_supabase_http()
+    r1 = await client.delete(qh_url, headers=headers)
+    if r1.status_code >= 400:
+        raise RuntimeError(
+            r1.text[:500] if r1.text else f"delete query_history failed: {r1.status_code}"
+        )
+    r2 = await client.delete(cm_url, headers=headers)
+    if r2.status_code >= 400:
+        raise RuntimeError(
+            r2.text[:500] if r2.text else f"delete conversation_metadata failed: {r2.status_code}"
+        )
 
 
 def _match_schemes_via_http(settings: Settings, query_embedding: List[float], k: int) -> List[Dict[str, Any]]:
@@ -419,8 +451,8 @@ def _match_schemes_via_http(settings: Settings, query_embedding: List[float], k:
     url = _join_rest(settings, "rpc/match_scheme_vectors")
     headers = _headers_svc(settings)
     body = {"query_embedding": _to_json_float_list(query_embedding), "match_count": k}
-    with httpx.Client(timeout=45.0) as client:
-        r = client.post(url, headers=headers, json=body)
+    client = get_supabase_sync_http()
+    r = client.post(url, headers=headers, json=body)
     if r.status_code >= 400:
         logger.warning("match_scheme_vectors RPC: %s %s", r.status_code, r.text[:300])
         return []
@@ -469,8 +501,8 @@ async def upsert_scheme_vector_rows(
         if "embedding" in prepared:
             prepared["embedding"] = _to_json_float_list(prepared["embedding"])
         payload_rows.append(prepared)
-    async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
-        r = await client.post(url, headers=headers, json=payload_rows)
+    client = get_supabase_http()
+    r = await client.post(url, headers=headers, json=payload_rows)
     if r.status_code >= 400:
         logger.warning("upsert_scheme_vector_rows: %s %s", r.status_code, r.text[:500])
         raise RuntimeError(r.text[:500])

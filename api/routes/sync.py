@@ -167,7 +167,7 @@ async def push_to_supabase() -> Dict[str, Any]:
     from offline.supabase_sync import SupabaseSync
 
     try:
-        return await SupabaseSync(settings).run()
+        return await SupabaseSync(settings).run_without_vectors()
     except Exception:
         logger.exception("SupabaseSync failed")
         raise

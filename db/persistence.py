@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from config.settings import Settings, get_settings
 from db import supabase_client
 from db.sqlite_client import (
     delete_conversation_local,
+    fetch_unsynced_conversation_metadata,
     get_conversation_metadata,
     get_conversations_by_farmer,
     get_farmer_twin,
@@ -21,14 +24,91 @@ from db.sqlite_client import (
 )
 from models.farmer import FarmerTwin
 
+from cache import cache_keys as ck
 from cache import qstash_client
+from cache import redis_client
 from cache.context_builder import append_turn_update_redis
 
 logger = logging.getLogger(__name__)
 
+# After this many unsynced conversation rows in SQLite, enqueue a QStash sync-push (non-blocking).
+_CONVERSATIONS_UNSYNCED_BATCH_THRESHOLD = 3
+
 
 def is_offline_context(connectivity: str) -> bool:
     return (connectivity or "").lower() == "offline"
+
+
+def _conversation_row_api_shape(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize SQLite unix timestamps for JSON / Redis (matches API list shape)."""
+    out: Dict[str, Any] = {
+        "conversation_id": row.get("conversation_id"),
+        "farmer_id": row.get("farmer_id"),
+        "title": row.get("title"),
+    }
+    for key in ("created_at", "updated_at"):
+        v = row.get(key)
+        if isinstance(v, int):
+            out[key] = datetime.fromtimestamp(v, tz=timezone.utc).isoformat()
+        else:
+            out[key] = v
+    return out
+
+
+async def _merge_conv_list_redis(
+    farmer_id: str,
+    conversation_id: str,
+    settings: Settings,
+) -> None:
+    """Prepend/update conversation in Redis conv_list (best-effort)."""
+    meta = await get_conversation_metadata(conversation_id.strip(), settings)
+    if not meta:
+        return
+    try:
+        conn = redis_client.redis_from_settings(settings)
+        key = ck.conversations_list_key(farmer_id)
+        existing = await redis_client.json_get_maybe(conn, key)
+        rows: List[Dict[str, Any]] = existing if isinstance(existing, list) else []
+        row = _conversation_row_api_shape(dict(meta))
+        cid = str(row.get("conversation_id") or "")
+        rows = [r for r in rows if isinstance(r, dict) and str(r.get("conversation_id")) != cid]
+        rows.insert(0, row)
+        await redis_client.json_setex(
+            conn,
+            key,
+            ck.ttl_conversations_list(settings),
+            rows,
+        )
+    except Exception as e:
+        logger.debug("conv_list Redis update skipped: %s", e)
+
+
+async def _maybe_enqueue_sync_push(settings: Settings) -> None:
+    if not settings.qstash_configured:
+        return
+    try:
+        unsynced = await fetch_unsynced_conversation_metadata(settings)
+        if len(unsynced) >= _CONVERSATIONS_UNSYNCED_BATCH_THRESHOLD:
+            asyncio.create_task(qstash_client.enqueue_sync_push(settings))
+    except Exception as e:
+        logger.warning("enqueue sync-push check failed: %s", e)
+
+
+async def _backfill_conv_list_from_sqlite(farmer_id: str, settings: Settings) -> None:
+    rows = await get_conversations_by_farmer(farmer_id, settings)
+    if not rows:
+        return
+    try:
+        conn = redis_client.redis_from_settings(settings)
+        payload = [_conversation_row_api_shape(dict(r)) for r in rows]
+        await redis_client.json_setex(
+            conn,
+            ck.conversations_list_key(farmer_id),
+            ck.ttl_conversations_list(settings),
+            payload,
+        )
+    except Exception as e:
+        logger.debug("conv_list Redis backfill skipped: %s", e)
 
 
 async def resolve_farmer_twin(
@@ -84,7 +164,7 @@ async def persist_conversation_metadata(
     connectivity: str,
     settings: Optional[Settings] = None,
 ) -> None:
-    """Upsert thread metadata to SQLite and/or Supabase."""
+    """Upsert thread metadata. Online + Supabase: SQLite queue + Redis; Supabase via batch sync."""
     settings = settings or get_settings()
     offline = is_offline_context(connectivity)
     if offline:
@@ -93,22 +173,16 @@ async def persist_conversation_metadata(
         )
         return
     if settings.supabase_db_configured:
-        try:
-            await supabase_client.upsert_conversation_metadata_remote(
-                conversation_id, farmer_id, title, settings=settings
-            )
-            await upsert_conversation_metadata(
-                conversation_id, farmer_id, title, settings, synced=1
-            )
-        except Exception as e:
-            logger.warning("Remote conversation_metadata upsert failed, queuing locally: %s", e)
-            await upsert_conversation_metadata(
-                conversation_id, farmer_id, title, settings, synced=0
-            )
-    else:
         await upsert_conversation_metadata(
-            conversation_id, farmer_id, title, settings, synced=1
+            conversation_id, farmer_id, title, settings, synced=0
         )
+        if settings.redis_configured:
+            await _merge_conv_list_redis(farmer_id, conversation_id, settings)
+        await _maybe_enqueue_sync_push(settings)
+        return
+    await upsert_conversation_metadata(
+        conversation_id, farmer_id, title, settings, synced=1
+    )
 
 
 async def resolve_conversations_by_farmer(
@@ -116,17 +190,37 @@ async def resolve_conversations_by_farmer(
     connectivity: str,
     settings: Optional[Settings] = None,
 ) -> List[Dict[str, Any]]:
-    """List conversation threads for a farmer (Supabase when online, else SQLite)."""
+    """List conversation threads: Redis cache, then SQLite, then Supabase if empty."""
     settings = settings or get_settings()
     if is_offline_context(connectivity) or not settings.supabase_db_configured:
         return await get_conversations_by_farmer(farmer_id, settings)
+
+    if settings.redis_configured:
+        try:
+            conn = redis_client.redis_from_settings(settings)
+            raw = await redis_client.json_get_maybe(
+                conn, ck.conversations_list_key(farmer_id)
+            )
+            if isinstance(raw, list) and raw:
+                return [dict(x) for x in raw if isinstance(x, dict)]
+        except Exception as e:
+            logger.warning("Redis conversation list read failed: %s", e)
+
+    local = await get_conversations_by_farmer(farmer_id, settings)
+    if local:
+        if settings.redis_configured:
+            await _backfill_conv_list_from_sqlite(farmer_id, settings)
+        return local
+
     try:
-        rows = await supabase_client.get_conversations_by_farmer_remote(farmer_id, settings)
+        rows = await supabase_client.get_conversations_by_farmer_remote(
+            farmer_id, settings
+        )
         if rows:
             return rows
     except Exception as e:
-        logger.warning("Remote conversation list failed, using local cache: %s", e)
-    return await get_conversations_by_farmer(farmer_id, settings)
+        logger.warning("Remote conversation list failed: %s", e)
+    return []
 
 
 async def resolve_conversation_history(
