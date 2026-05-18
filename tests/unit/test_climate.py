@@ -9,6 +9,10 @@ from modules.climate import engine as climate_engine
 
 @pytest.mark.asyncio
 async def test_get_weather_widget_shape(monkeypatch):
+    import modules.climate.engine as eng
+
+    monkeypatch.setattr(eng, "_climate_http", None)
+
     class FakeResp:
         status_code = 200
 
@@ -36,16 +40,14 @@ async def test_get_weather_widget_shape(monkeypatch):
             }
 
     class FakeClient:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            return None
-
         async def get(self, url, params=None):
             return FakeResp()
 
-    monkeypatch.setattr("modules.climate.engine.httpx.AsyncClient", lambda timeout=30.0: FakeClient())
+    monkeypatch.setattr(
+        eng.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: FakeClient(),
+    )
     out = await climate_engine.get_weather_widget(30.0, 75.0)
     assert "current" in out
     assert len(out["forecast"]) == 5
@@ -60,6 +62,10 @@ def test_wmo_weather_condition():
 
 @pytest.mark.asyncio
 async def test_get_weather_shape(monkeypatch):
+    import modules.climate.engine as eng
+
+    monkeypatch.setattr(eng, "_climate_http", None)
+
     class FakeResp:
         status_code = 200
 
@@ -78,16 +84,14 @@ async def test_get_weather_shape(monkeypatch):
             }
 
     class FakeClient:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            return None
-
         async def get(self, url, params=None):
             return FakeResp()
 
-    monkeypatch.setattr("modules.climate.engine.httpx.AsyncClient", lambda timeout=30.0: FakeClient())
+    monkeypatch.setattr(
+        eng.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: FakeClient(),
+    )
     out = await climate_engine.get_weather(30.0, 75.0, "wheat")
     assert "rain_risk" in out
     assert out["source"] == "open_meteo"

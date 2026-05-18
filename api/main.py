@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import asyncio
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,17 +30,33 @@ async def lifespan(app: FastAPI):
 
         logging.getLogger(__name__).exception("vector_store.build_index() failed")
     if settings.supabase_db_configured:
-        try:
-            from offline.supabase_sync import SupabaseSync
+        import logging as _log
 
-            await SupabaseSync(settings).run()
-        except Exception:
-            import logging
+        async def _startup_supabase_row_sync() -> None:
+            try:
+                from offline.supabase_sync import SupabaseSync
 
-            logging.getLogger(__name__).exception("SupabaseSync on startup failed")
+                await SupabaseSync(settings).run_without_vectors()
+            except Exception:
+                _log.getLogger(__name__).exception(
+                    "SupabaseSync run_without_vectors on startup failed"
+                )
+
+        async def _startup_scheme_vectors() -> None:
+            try:
+                from offline.supabase_sync import SupabaseSync
+
+                n = await SupabaseSync(settings).sync_scheme_vectors()
+                _log.getLogger(__name__).info("startup scheme_vectors chunks=%s", n)
+            except Exception:
+                _log.getLogger(__name__).exception(
+                    "SupabaseSync scheme vectors on startup failed"
+                )
+
+        asyncio.create_task(_startup_supabase_row_sync())
+        asyncio.create_task(_startup_scheme_vectors())
 
     if settings.redis_configured and settings.startup_cache_warmup:
-        import asyncio
         import logging as _log
 
         async def _startup_warm() -> None:
@@ -57,6 +74,15 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_startup_warm())
 
     yield
+
+    try:
+        from db import supabase_client
+
+        await supabase_client.close_supabase_http()
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception("close_supabase_http on shutdown failed")
 
 
 def create_app() -> FastAPI:

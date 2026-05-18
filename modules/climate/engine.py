@@ -13,6 +13,16 @@ from config.settings import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
+_CLIMATE_LIMITS = httpx.Limits(max_connections=20, max_keepalive_connections=10)
+_climate_http: httpx.AsyncClient | None = None
+
+
+def _get_weather_http() -> httpx.AsyncClient:
+    global _climate_http
+    if _climate_http is None:
+        _climate_http = httpx.AsyncClient(timeout=30.0, limits=_CLIMATE_LIMITS)
+    return _climate_http
+
 
 CROP_WATER: Dict[str, int] = {
     "wheat": 2,
@@ -109,10 +119,10 @@ async def get_weather_widget(lat: float, lng: float, settings: Optional[Settings
         "timezone": "Asia/Kolkata",
         "forecast_days": 5,
     }
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        r = await client.get(url, params=params)
-        r.raise_for_status()
-        data = r.json()
+    client = _get_weather_http()
+    r = await client.get(url, params=params)
+    r.raise_for_status()
+    data = r.json()
 
     cur = data.get("current") or {}
     cur_code = cur.get("weather_code")
@@ -184,10 +194,10 @@ async def get_weather(lat: float, lng: float, crop: str, settings: Optional[Sett
         "timezone": "Asia/Kolkata",
         "forecast_days": 7,
     }
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        r = await client.get(url, params=params)
-        r.raise_for_status()
-        data = r.json()
+    client = _get_weather_http()
+    r = await client.get(url, params=params)
+    r.raise_for_status()
+    data = r.json()
 
     daily = data.get("daily") or {}
     probs = daily.get("precipitation_probability_max") or []

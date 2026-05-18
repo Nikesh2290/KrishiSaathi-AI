@@ -16,7 +16,6 @@ from db.persistence import (
     resolve_conversation_history,
     resolve_conversations_by_farmer,
 )
-from db.sqlite_client import get_conversation_metadata
 
 router = APIRouter(prefix="/api/v1", tags=["conversation"])
 
@@ -74,16 +73,14 @@ async def create_conversation(
         connectivity,
         settings=settings,
     )
-    meta = await get_conversation_metadata(conversation_id, settings)
-    if not meta:
-        return {
-            "conversation_id": conversation_id,
-            "farmer_id": body.farmer_id,
-            "title": body.title,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }
-    return _serialize_conversation_row(meta)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    return {
+        "conversation_id": conversation_id,
+        "farmer_id": body.farmer_id,
+        "title": body.title,
+        "created_at": now_iso,
+        "updated_at": now_iso,
+    }
 
 
 @router.get("/farmer/{farmer_id}/conversations")

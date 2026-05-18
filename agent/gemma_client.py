@@ -18,6 +18,16 @@ from config.settings import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
+_OLLAMA_LIMITS = httpx.Limits(max_connections=10, max_keepalive_connections=5)
+_ollama_http: httpx.AsyncClient | None = None
+
+
+def get_ollama_http() -> httpx.AsyncClient:
+    global _ollama_http
+    if _ollama_http is None:
+        _ollama_http = httpx.AsyncClient(timeout=120.0, limits=_OLLAMA_LIMITS)
+    return _ollama_http
+
 
 def _to_lc_messages(messages: Sequence[Union[dict, BaseMessage]]) -> List[BaseMessage]:
     out: List[BaseMessage] = []
@@ -64,11 +74,11 @@ async def _ollama_chat(
     images: Optional[List[str]] = None,
 ) -> str:
     url, payload = _ollama_messages_payload(settings, messages, images)
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        r = await client.post(url, json=payload)
-        r.raise_for_status()
-        data = r.json()
-        return data.get("message", {}).get("content", "") or ""
+    client = get_ollama_http()
+    r = await client.post(url, json=payload)
+    r.raise_for_status()
+    data = r.json()
+    return data.get("message", {}).get("content", "") or ""
 
 
 async def _ollama_chat_stream(
@@ -78,24 +88,24 @@ async def _ollama_chat_stream(
 ) -> AsyncIterator[str]:
     """Stream incremental assistant text chunks from Ollama /api/chat (NDJSON)."""
     url, payload = _ollama_messages_payload(settings, messages, images, stream=True)
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        async with client.stream("POST", url, json=payload) as r:
-            r.raise_for_status()
-            async for line in r.aiter_lines():
-                line = (line or "").strip()
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
-                except json.JSONDecodeError:
-                    logger.debug("Ollama stream skip non-json line: %s", line[:80])
-                    continue
-                msg = data.get("message") or {}
-                chunk = msg.get("content") or ""
-                if chunk:
-                    yield chunk
-                if data.get("done"):
-                    break
+    client = get_ollama_http()
+    async with client.stream("POST", url, json=payload) as r:
+        r.raise_for_status()
+        async for line in r.aiter_lines():
+            line = (line or "").strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                logger.debug("Ollama stream skip non-json line: %s", line[:80])
+                continue
+            msg = data.get("message") or {}
+            chunk = msg.get("content") or ""
+            if chunk:
+                yield chunk
+            if data.get("done"):
+                break
 
 
 def _studio_llm(settings: Settings, heavy: bool = False) -> ChatGoogleGenerativeAI:

@@ -182,6 +182,11 @@ class Settings(BaseSettings):
     redis_schemes_index_ttl_seconds: int = Field(
         default=2592000, alias="REDIS_SCHEMES_INDEX_TTL_SECONDS", description="Default 30d."
     )
+    redis_conversations_list_ttl_seconds: int = Field(
+        default=604800,
+        alias="REDIS_CONVERSATIONS_LIST_TTL_SECONDS",
+        description="TTL for per-farmer conversation list cache in Redis (default 7d).",
+    )
 
     # QStash — async jobs (persist to Supabase, sync, bundle regenerate, optional escalation enqueue)
     qstash_token: str = Field(default="", alias="QSTASH_TOKEN")

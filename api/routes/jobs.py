@@ -71,7 +71,7 @@ async def qstash_sync_push(request: Request) -> Dict[str, Any]:
         raise HTTPException(status_code=503, detail="supabase_not_configured")
     from offline.supabase_sync import SupabaseSync
 
-    return await SupabaseSync(settings).run()
+    return await SupabaseSync(settings).run_without_vectors()
 
 
 @router.post("/regenerate-bundle")

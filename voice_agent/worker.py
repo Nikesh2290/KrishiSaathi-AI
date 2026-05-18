@@ -363,6 +363,7 @@ class KrishiVoiceAgent(Agent):
         farmer_id: str,
         conversation_id: Optional[str],
         language: str,
+        http_client: httpx.AsyncClient,
         farmer_name: str | None = None,
         session_id: str | None = None,
         room_name: str | None = None,
@@ -374,6 +375,7 @@ class KrishiVoiceAgent(Agent):
         self._farmer_name = farmer_name
         self._session_id = session_id
         self._room_name = room_name
+        self._http_client = http_client
         super().__init__(
             instructions=(
                 "You are Krishi Saathi, an Indian agriculture assistant. "
@@ -457,58 +459,44 @@ class KrishiVoiceAgent(Agent):
 
         try:
             tl.mark("api_query_stream_start", api_base=self._api_base)
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                async for obj in iter_query_stream_events(
-                    client,
-                    api_base=self._api_base,
-                    payload=payload,
-                    timeline=tl,
-                    turn_id=turn_id,
-                ):
-                    sse_event_count += 1
-                    otype = obj.get("type")
-                    if otype == "data-stage":
-                        data = obj.get("data") if isinstance(obj.get("data"), dict) else {}
-                        stage = str(data.get("stage") or "")
-                        variants = stage_lists.get(stage) or []
-                        if saw_answer_delta or filler_count >= _MAX_FILLERS_PER_TURN:
-                            continue
-                        phrase = _pick_variant(variants, self._farmer_name, spoken_fillers)
-                        if phrase:
-                            filler_count += 1
-                            filler_events += 1
-                            tl.mark(
-                                "filler_yield_stage",
-                                stage=stage,
-                                phrase_chars=len(phrase),
-                                filler_index=filler_count,
-                            )
-                            yield phrase + " "
-                    elif otype == "data-tool":
-                        data = obj.get("data") if isinstance(obj.get("data"), dict) else {}
-                        if data.get("status") != "started":
-                            continue
-                        tool = str(data.get("tool") or "")
-                        if tool in _TOOL_COUNT_TOOLS:
-                            tool_only_starts += 1
-                        if saw_answer_delta:
-                            continue
-                        if tool == "synthesizing":
-                            if tool_only_starts >= 2 and filler_count < _MAX_FILLERS_PER_TURN:
-                                phrase = _try_emit_tool_filler("synthesizing")
-                                if phrase:
-                                    filler_count += 1
-                                    filler_events += 1
-                                    tl.mark(
-                                        "filler_yield_tool",
-                                        tool=tool,
-                                        phrase_chars=len(phrase),
-                                        filler_index=filler_count,
-                                    )
-                                    yield phrase + " "
-                            continue
-                        if tool in _TOOL_COUNT_TOOLS and filler_count < 1:
-                            phrase = _try_emit_tool_filler(tool)
+            async for obj in iter_query_stream_events(
+                self._http_client,
+                api_base=self._api_base,
+                payload=payload,
+                timeline=tl,
+                turn_id=turn_id,
+            ):
+                sse_event_count += 1
+                otype = obj.get("type")
+                if otype == "data-stage":
+                    data = obj.get("data") if isinstance(obj.get("data"), dict) else {}
+                    stage = str(data.get("stage") or "")
+                    variants = stage_lists.get(stage) or []
+                    if saw_answer_delta or filler_count >= _MAX_FILLERS_PER_TURN:
+                        continue
+                    phrase = _pick_variant(variants, self._farmer_name, spoken_fillers)
+                    if phrase:
+                        filler_count += 1
+                        filler_events += 1
+                        tl.mark(
+                            "filler_yield_stage",
+                            stage=stage,
+                            phrase_chars=len(phrase),
+                            filler_index=filler_count,
+                        )
+                        yield phrase + " "
+                elif otype == "data-tool":
+                    data = obj.get("data") if isinstance(obj.get("data"), dict) else {}
+                    if data.get("status") != "started":
+                        continue
+                    tool = str(data.get("tool") or "")
+                    if tool in _TOOL_COUNT_TOOLS:
+                        tool_only_starts += 1
+                    if saw_answer_delta:
+                        continue
+                    if tool == "synthesizing":
+                        if tool_only_starts >= 2 and filler_count < _MAX_FILLERS_PER_TURN:
+                            phrase = _try_emit_tool_filler("synthesizing")
                             if phrase:
                                 filler_count += 1
                                 filler_events += 1
@@ -519,76 +507,89 @@ class KrishiVoiceAgent(Agent):
                                     filler_index=filler_count,
                                 )
                                 yield phrase + " "
-                        elif tool == "thinking" and filler_count < 1:
-                            phrase = _try_emit_tool_filler("thinking")
-                            if phrase:
-                                filler_count += 1
-                                filler_events += 1
-                                tl.mark(
-                                    "filler_yield_tool",
-                                    tool="thinking",
-                                    phrase_chars=len(phrase),
-                                    filler_index=filler_count,
-                                )
-                                yield phrase + " "
-                    elif otype == "text-delta":
-                        delta = str(obj.get("delta") or "")
-                        if not delta:
-                            continue
-                        if not saw_answer_delta:
-                            tl.mark("first_answer_token", delta_chars=len(delta))
-                        saw_answer_delta = True
-                        sentence_buf += delta
-                        while True:
-                            cut = _sentence_boundary(sentence_buf)
-                            force = len(sentence_buf) > _VOICE_CHUNK_MAX_BUF and cut is not None
-                            if cut is None:
-                                break
-                            candidate_raw = sentence_buf[:cut]
-                            strong = _is_strong_flush_boundary(candidate_raw) or force
-                            if len(candidate_raw.strip()) < _VOICE_MIN_CHUNK_CHARS and not strong:
-                                break
-                            sentence_buf = sentence_buf[cut:]
-                            chunk = candidate_raw.strip()
-                            if not chunk:
-                                continue
-                            chunk = _strip_chunk_overlap(chunk, last_spoken_tail)
-                            if not chunk:
-                                continue
-                            if os.getenv("VOICE_DEBUG_CHUNK"):
-                                logger.debug("VOICE chunk_out=%r rest=%r", chunk, sentence_buf[:120])
-                            last_spoken_tail = chunk[-80:] if len(chunk) > 80 else chunk
-                            tts_chunk_count += 1
-                            if tts_chunk_count == 1:
-                                tl.mark(
-                                    "first_tts_text_yield",
-                                    chunk_chars=len(chunk),
-                                    buf_remaining=len(sentence_buf),
-                                )
+                        continue
+                    if tool in _TOOL_COUNT_TOOLS and filler_count < 1:
+                        phrase = _try_emit_tool_filler(tool)
+                        if phrase:
+                            filler_count += 1
+                            filler_events += 1
                             tl.mark(
-                                "tts_text_yield",
-                                chunk_index=tts_chunk_count,
+                                "filler_yield_tool",
+                                tool=tool,
+                                phrase_chars=len(phrase),
+                                filler_index=filler_count,
+                            )
+                            yield phrase + " "
+                    elif tool == "thinking" and filler_count < 1:
+                        phrase = _try_emit_tool_filler("thinking")
+                        if phrase:
+                            filler_count += 1
+                            filler_events += 1
+                            tl.mark(
+                                "filler_yield_tool",
+                                tool="thinking",
+                                phrase_chars=len(phrase),
+                                filler_index=filler_count,
+                            )
+                            yield phrase + " "
+                elif otype == "text-delta":
+                    delta = str(obj.get("delta") or "")
+                    if not delta:
+                        continue
+                    if not saw_answer_delta:
+                        tl.mark("first_answer_token", delta_chars=len(delta))
+                    saw_answer_delta = True
+                    sentence_buf += delta
+                    while True:
+                        cut = _sentence_boundary(sentence_buf)
+                        force = len(sentence_buf) > _VOICE_CHUNK_MAX_BUF and cut is not None
+                        if cut is None:
+                            break
+                        candidate_raw = sentence_buf[:cut]
+                        strong = _is_strong_flush_boundary(candidate_raw) or force
+                        if len(candidate_raw.strip()) < _VOICE_MIN_CHUNK_CHARS and not strong:
+                            break
+                        sentence_buf = sentence_buf[cut:]
+                        chunk = candidate_raw.strip()
+                        if not chunk:
+                            continue
+                        chunk = _strip_chunk_overlap(chunk, last_spoken_tail)
+                        if not chunk:
+                            continue
+                        if os.getenv("VOICE_DEBUG_CHUNK"):
+                            logger.debug("VOICE chunk_out=%r rest=%r", chunk, sentence_buf[:120])
+                        last_spoken_tail = chunk[-80:] if len(chunk) > 80 else chunk
+                        tts_chunk_count += 1
+                        if tts_chunk_count == 1:
+                            tl.mark(
+                                "first_tts_text_yield",
                                 chunk_chars=len(chunk),
                                 buf_remaining=len(sentence_buf),
                             )
-                            yield chunk + " "
-                    elif otype == "error":
-                        err_txt = str(obj.get("errorText") or "unknown error")
-                        tl.mark("api_stream_error", error_text=err_txt[:200])
-                        logger.warning("query stream error from API: %s", err_txt)
-                        apology = (
-                            "Maafi, abhi madad nahi ho payi. Dobara boliye."
-                            if lang_key == "hi"
-                            else "Sorry, I couldn't help right now. Please try again."
+                        tl.mark(
+                            "tts_text_yield",
+                            chunk_index=tts_chunk_count,
+                            chunk_chars=len(chunk),
+                            buf_remaining=len(sentence_buf),
                         )
-                        tl.finish(
-                            outcome="api_error",
-                            sse_events=sse_event_count,
-                            tts_chunks=tts_chunk_count,
-                            fillers=filler_events,
-                        )
-                        yield apology
-                        return
+                        yield chunk + " "
+                elif otype == "error":
+                    err_txt = str(obj.get("errorText") or "unknown error")
+                    tl.mark("api_stream_error", error_text=err_txt[:200])
+                    logger.warning("query stream error from API: %s", err_txt)
+                    apology = (
+                        "Maafi, abhi madad nahi ho payi. Dobara boliye."
+                        if lang_key == "hi"
+                        else "Sorry, I couldn't help right now. Please try again."
+                    )
+                    tl.finish(
+                        outcome="api_error",
+                        sse_events=sse_event_count,
+                        tts_chunks=tts_chunk_count,
+                        fillers=filler_events,
+                    )
+                    yield apology
+                    return
             tl.mark(
                 "api_query_stream_end",
                 sse_events=sse_event_count,
@@ -723,6 +724,10 @@ async def entrypoint(ctx: JobContext) -> None:
         endpointing_min_s=0.4,
         endpointing_max_s=3.0,
     )
+    stream_client = httpx.AsyncClient(
+        timeout=120.0,
+        limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+    )
     session = AgentSession(
         vad=vad,
         stt=stt_model,
@@ -737,6 +742,7 @@ async def entrypoint(ctx: JobContext) -> None:
         farmer_id=farmer_id,
         conversation_id=conv,
         language=language,
+        http_client=stream_client,
         farmer_name=farmer_nm,
         session_id=session_id,
         room_name=ctx.room.name,
@@ -749,6 +755,8 @@ async def entrypoint(ctx: JobContext) -> None:
         session_tl.mark("agent_session_start_failed", error=str(exc)[:200])
         logger.info("Session could not start (room already gone?): %s", exc)
         return
+    finally:
+        await stream_client.aclose()
     session_tl.mark("agent_session_ready")
 
     welcome_key = f"{ctx.room.name}:{farmer_id}"
