@@ -728,6 +728,14 @@ async def entrypoint(ctx: JobContext) -> None:
         timeout=120.0,
         limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
     )
+
+    async def _close_http() -> None:
+        if stream_client.is_closed:
+            return
+        await stream_client.aclose()
+
+    ctx.add_shutdown_callback(_close_http)
+
     session = AgentSession(
         vad=vad,
         stt=stt_model,
@@ -754,7 +762,7 @@ async def entrypoint(ctx: JobContext) -> None:
     except RuntimeError as exc:
         session_tl.mark("agent_session_start_failed", error=str(exc)[:200])
         logger.info("Session could not start (room already gone?): %s", exc)
-        await stream_client.aclose()
+        await _close_http()
         return
     session_tl.mark("agent_session_ready")
 
@@ -772,8 +780,6 @@ async def entrypoint(ctx: JobContext) -> None:
         _WELCOME_SENT_KEYS.add(welcome_key)
     else:
         session_tl.mark("welcome_tts_skipped", reason="already_sent")
-
-    await stream_client.aclose()
 
 
 if __name__ == "__main__":
