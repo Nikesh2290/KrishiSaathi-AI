@@ -9,7 +9,7 @@ from typing import Any, Dict
 
 from agent.gemma_client import generate_with_vision
 from config.settings import Settings, get_settings
-from modules.vision.tagger import validate_and_resize_b64
+from modules.vision.tagger import validate_and_resize_b64_async
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +99,7 @@ async def analyze_image(
             "note": "no_image",
         }
 
-    norm_b64, norm_mime = validate_and_resize_b64(image_b64)
+    norm_b64, norm_mime = await validate_and_resize_b64_async(image_b64)
     vision_mime = norm_mime or source_mime or "image/jpeg"
     user = (
         f'Farmer question (answer via JSON fields; same language tone as question): "{q}"\n'

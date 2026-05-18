@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -62,7 +63,7 @@ def build_index() -> None:
     logger.info("Chroma index built: %s chunks", len(docs))
 
 
-def get_collection():
+def _get_collection_sync():
     global _client, _collection
     if _collection is not None:
         return _collection
@@ -76,18 +77,8 @@ def get_collection():
     return _collection
 
 
-def search(query: str, k: int = 5, *, use_supabase: bool = False) -> List[Dict[str, Any]]:
-    """When use_supabase and env is configured, search Supabase pgvector; else ChromaDB."""
-    if use_supabase:
-        try:
-            from db.supabase_client import search_schemes_vector_remote_sync
-
-            remote = search_schemes_vector_remote_sync(query, k=k)
-            if remote:
-                return remote
-        except Exception as e:
-            logger.warning("Supabase scheme search failed: %s", e)
-    col = get_collection()
+def _chroma_search_sync(query: str, k: int) -> List[Dict[str, Any]]:
+    col = _get_collection_sync()
     if col.count() == 0:
         return []
     res = col.query(query_texts=[query], n_results=min(k, max(1, col.count())))
@@ -102,6 +93,20 @@ def search(query: str, k: int = 5, *, use_supabase: bool = False) -> List[Dict[s
     return out
 
 
+async def search(query: str, k: int = 5, *, use_supabase: bool = False) -> List[Dict[str, Any]]:
+    """When use_supabase and env is configured, search Supabase pgvector; else ChromaDB."""
+    if use_supabase:
+        try:
+            from db.supabase_client import search_schemes_vector_remote_async
+
+            remote = await search_schemes_vector_remote_async(query, k=k)
+            if remote:
+                return remote
+        except Exception as e:
+            logger.warning("Supabase scheme search failed: %s", e)
+    return await asyncio.to_thread(_chroma_search_sync, query, k)
+
+
 async def search_upstash_async(
     query: str,
     k: int = 5,
@@ -112,8 +117,6 @@ async def search_upstash_async(
     if not settings.upstash_vector_configured or not settings.google_api_key.strip():
         return []
     try:
-        import asyncio
-
         from cache import gemini_embed
         from cache.vector_client import get_async_vector_index
 

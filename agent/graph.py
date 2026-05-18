@@ -212,7 +212,9 @@ Allowed TOOL_NAME values and params:
   Disease / pest on leaves / identify problem FROM IMAGE. If query.image_ref is present OR device_intent suggests crop disease, include vision with use_image true when image_ref exists.
 
 - scheme — params: {"query": string}
-  Government schemes, subsidies, PM-KISAN, KCC rules, eligibility.
+  ONLY when user EXPLICITLY asks about government schemes, subsidies, yojana, sarkari sahayata.
+  Do NOT use for loans, KCC, insurance (use financial instead).
+  Do NOT guess — if not clearly about schemes, use another tool.
 
 - market — params: {"crop": string, "district": string}
   Mandi price, market rate, selling price.
@@ -262,7 +264,7 @@ Allowed tools & params:
 - crop_planner — {"season": "rabi|kharif|zaid", "crop": "<crop or wheat>"} — what to grow this season (NOT how-to plant a named crop).
 - climate — {"lat": number, "lng": number, "crop": string} — weather/forecast/rain.
 - vision — {"use_image": true|false} — disease from leaf photo if image_ref exists.
-- scheme — {"query": string} — govt schemes/subsidies.
+- scheme — {"query": string} — ONLY if user explicitly asks about govt schemes/subsidies/yojana. Not for loans.
 - market — {"crop": string, "district": string} — mandi prices.
 - financial — {} — loans/KCC/insurance.
 
@@ -288,7 +290,7 @@ def _heuristic_plan(req: AgentRequest) -> List[Dict[str, Any]]:
         return [{"tool": "vision", "params": {"use_image": True}}]
     if "weather" in intent or any(k in text for k in ("rain", "weather", "मौसम", "बारिश", "barish", "baarish", "mausam")):
         return [{"tool": "climate", "params": {"lat": lat, "lng": lng, "crop": crop}}]
-    if any(k in text for k in ("scheme", "subsidy", "pm-kisan", "kcc", "योजना", "yojana")):
+    if any(k in text for k in ("scheme", "subsidy", "pm-kisan", "योजना", "yojana")):
         return [{"tool": "scheme", "params": {"query": req.query.text or "schemes"}}]
     if "market" in intent or any(k in text for k in ("price", "mandi", "rate", "bhav", "मंडी")):
         dist = req.context.location.get("district") or "Ludhiana"
